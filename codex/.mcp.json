@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "antigravity": {
+      "cwd": ".",
+      "command": "python",
+      "args": ["./codex/mcp_server.py"],
+      "startup_timeout_sec": 30,
+      "tool_timeout_sec": 2100
+    }
+  }
+}
