@@ -63,12 +63,45 @@ class McpAdapterTests(unittest.TestCase):
                 self.assertEqual(self.wrapper(), expected)
 
     def test_packaged_timeout_policy_allows_long_codex_and_claude_calls(self):
-        config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
-        server = config["mcpServers"]["antigravity"]
+        # The two hosts read different files and resolve paths differently, so the
+        # script path is host-specific. Both keep cwd "." so the server still gets the
+        # caller's workspace as the fallback --dir for delegation.
+        claude = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        server = claude["mcpServers"]["antigravity"]
+        # Claude Code resolves .mcp.json paths against the session cwd, not the
+        # plugin, so a "./..." arg makes the server fail to start in every session.
         self.assertEqual(server["cwd"], ".")
-        self.assertEqual(server["args"], ["./codex/mcp_server.py"])
-        self.assertNotIn("PLUGIN_ROOT", json.dumps(server))
+        self.assertEqual(
+            server["args"], ["${CLAUDE_PLUGIN_ROOT}/codex/mcp_server.py"]
+        )
+        for arg in server["args"]:
+            self.assertFalse(arg.startswith("./") or arg.startswith("../"), arg)
         self.assertGreaterEqual(server["tool_timeout_sec"], 2100)
+
+        # Codex resolves cwd "." to the plugin root and runs relative args against it,
+        # but it does NOT substitute ${CLAUDE_PLUGIN_ROOT} and does not export it, so
+        # the Claude form would reach python as a literal and never start.
+        codex_manifest = json.loads(
+            (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(codex_manifest["mcpServers"], "./codex/.mcp.json")
+        codex_path = ROOT / "codex" / ".mcp.json"
+        codex_raw = codex_path.read_text(encoding="utf-8")
+        self.assertNotIn("CLAUDE_", codex_raw)
+        codex_server = json.loads(codex_raw)["mcpServers"]["antigravity"]
+        self.assertEqual(codex_server["cwd"], ".")
+        self.assertEqual(codex_server["args"], ["./codex/mcp_server.py"])
+        self.assertGreaterEqual(codex_server["tool_timeout_sec"], 2100)
+
+        # Both hosts must end up launching the same script with the same limits.
+        self.assertEqual(
+            Path(server["args"][0]).name, Path(codex_server["args"][0]).name
+        )
+        self.assertEqual(server["command"], codex_server["command"])
+        self.assertEqual(
+            server["startup_timeout_sec"], codex_server["startup_timeout_sec"]
+        )
+        self.assertTrue((ROOT / "codex" / "mcp_server.py").is_file())
 
         claude_manifest = json.loads(
             (ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
