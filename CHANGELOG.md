@@ -3,6 +3,15 @@
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## Unreleased
+
+- Fix the bundled MCP server never starting under Claude Code: `.mcp.json` passed
+  `./codex/mcp_server.py`, which Claude Code resolves against the *session* working
+  directory instead of the plugin, so every session failed with
+  `can't open file '<cwd>\codex\mcp_server.py'`. The path now uses
+  `${CLAUDE_PLUGIN_ROOT}`, which both Claude Code and Codex substitute.
+- Add a manifest regression check rejecting host-relative `args` in `.mcp.json`.
+
 ## 0.31.40 — Compact prompts and strict-mode helper exceptions
 
 - Require authored Agy task instructions to remain below 800 words on Claude and
