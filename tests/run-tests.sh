@@ -42,6 +42,7 @@ for rel in (
     ".codex-plugin/plugin.json",
     ".agents/plugins/marketplace.json",
     ".mcp.json",
+    "codex/.mcp.json",
     "claude/hooks/hooks.json",
     "hooks/hooks.json",
     "hooks/policy-context.json",

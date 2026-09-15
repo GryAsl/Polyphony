@@ -11,7 +11,7 @@
   "license": "MIT",
   "keywords": ["polyphony", "antigravity", "gemini", "codex", "delegation", "windows", "conpty"],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./codex/.mcp.json",
   "interface": {
     "displayName": "Polyphony",
     "shortDescription": "Orchestrate Antigravity workers from Codex",

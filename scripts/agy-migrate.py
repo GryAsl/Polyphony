@@ -1101,6 +1101,21 @@ def postprocess_staged(stage, plugins, plan):
                              f"emptied and we could not reconstruct "
                              f"({', '.join(dropped)}) — re-add them by hand")
 
+        # Defect 1b: a stdio entry keeps whatever path the plugin declared, and a
+        # Claude plugin may resolve its server through ${CLAUDE_PLUGIN_ROOT}.
+        # Antigravity never sets it, so the literal would survive into
+        # mcp_config.json and the server could not start. Same rewrite as the
+        # hooks below, anchored on the staged plugin directory.
+        if os.path.isfile(mcp_path):
+            txt = read_text(mcp_path)
+            new = txt.replace("${CLAUDE_PLUGIN_ROOT}/", "./")
+            new = new.replace("$CLAUDE_PLUGIN_ROOT/", "./")
+            if new != txt:
+                with open(mcp_path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(new)
+                notes.append(f"{name}: rewrote ${{CLAUDE_PLUGIN_ROOT}} in MCP "
+                             f"paths to a relative path")
+
         # Defect 2: Claude's hook schema copied verbatim.
         hpath = os.path.join(d, "hooks.json")
         h = read_json(hpath, None)

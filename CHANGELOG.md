@@ -3,6 +3,30 @@
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## Unreleased
+
+- Fix the bundled MCP server never starting under Claude Code: `.mcp.json` passed
+  `./codex/mcp_server.py`, which Claude Code resolves against the *session* working
+  directory instead of the plugin, so every session failed with
+  `can't open file '<cwd>\codex\mcp_server.py'`. The path now uses
+  `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes; `cwd` stays `.` so
+  delegation keeps defaulting to the caller's workspace.
+- Keep Codex on its own MCP config. Codex does **not** substitute
+  `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` args and does not export it to the server
+  process, so the Claude-side form reaches `python` as a literal and the server never
+  starts. `.codex-plugin/plugin.json` points at `codex/.mcp.json` again, which keeps
+  the plugin-relative `./codex/mcp_server.py` that Codex resolves against the plugin
+  root via `cwd: "."`. Claude Code only auto-discovers the root `.mcp.json`, so the
+  two hosts no longer share one incompatible path.
+- Rewrite `${CLAUDE_PLUGIN_ROOT}` to a relative path in the staged `mcp_config.json`
+  during migration, as already done for hooks. Antigravity never sets the variable and
+  the native importer copies a stdio server's path verbatim, so a migrated server would
+  otherwise be left with an unusable literal.
+- Add regression coverage for all three: host-relative `args` in the Claude
+  `.mcp.json`, any `CLAUDE_` literal in the Codex config plus the manifest pointer
+  that selects it, and an unrewritten plugin-root literal surviving
+  `postprocess_staged`.
+
 ## 0.31.40 — Compact prompts and strict-mode helper exceptions
 
 - Require authored Agy task instructions to remain below 800 words on Claude and
