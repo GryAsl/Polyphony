@@ -383,12 +383,17 @@ for d in (src, os.path.join(staged, ".claude-plugin"), os.path.join(staged, "com
 
 # Original plugin: one remote server, one stdio server.
 json.dump({"mcpServers": {"rem": {"type": "http", "url": "https://ex.test/mcp"},
-                          "loc": {"command": "echo", "args": ["1"]}}},
+                          "loc": {"command": "echo", "args": ["1"]},
+                          "rooted": {"command": "python",
+                                     "args": ["${CLAUDE_PLUGIN_ROOT}/s.py"],
+                                     "cwd": "."}}},
           open(os.path.join(src, ".mcp.json"), "w"))
 
 # Exactly what the importer emits: the remote entry gutted to an empty command.
 json.dump({"mcpServers": {"rem": {"command": "", "args": None, "cwd": "", "env": None},
-                          "loc": {"command": "echo", "args": ["1"], "cwd": "", "env": None}}},
+                          "loc": {"command": "echo", "args": ["1"], "cwd": "", "env": None},
+                          "rooted": {"command": "python", "cwd": ".", "env": None,
+                                     "args": ["${CLAUDE_PLUGIN_ROOT}/s.py"]}}},
           open(os.path.join(staged, "mcp_config.json"), "w"))
 # ...Claude's hook schema copied verbatim, pointing at a script in hooks/.
 json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
@@ -406,6 +411,10 @@ notes = m.postprocess_staged(os.path.join(tmp, "stage"), {"p": src}, m.Plan())
 mcp = json.load(open(os.path.join(staged, "mcp_config.json")))["mcpServers"]
 assert mcp["rem"] == {"serverUrl": "https://ex.test/mcp"}, mcp   # URL recovered
 assert mcp["loc"]["command"] == "echo" and "cwd" not in mcp["loc"], mcp  # blanks dropped
+# Antigravity never sets ${CLAUDE_PLUGIN_ROOT}; a stdio entry keeps its own
+# command, so the literal has to be rewritten or the server cannot start.
+assert mcp["rooted"]["args"] == ["./s.py"], mcp
+assert "CLAUDE_PLUGIN_ROOT" not in json.dumps(mcp), mcp
 
 h = json.load(open(os.path.join(staged, "hooks.json")))
 assert list(h) == ["p-hooks"], h                                  # named-hook map
@@ -423,6 +432,7 @@ for junk in (".claude-plugin", "commands", ".mcp.json"):
 fm = open(os.path.join(staged, "skills", "p-cmd-x", "SKILL.md")).read()
 assert fm.startswith("---\nname: p-cmd-x\n"), fm                  # name: restored
 assert any("restored remote MCP" in n for n in notes), notes
+assert any("in MCP paths" in n for n in notes), notes
 PY
 then ok "postprocess_staged repairs MCP + hooks and keeps the hook scripts"
 else bad "postprocess_staged integration check failed"; fi

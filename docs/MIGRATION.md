@@ -155,7 +155,9 @@ object. Matchers are step-type names (`CORTEX_STEP_TYPE_*` lowercased, prefix re
 | `Write`, `Edit` | `propose_code\|write_blob` (approximate) |
 
 `${CLAUDE_PLUGIN_ROOT}` is never set by Antigravity. Hook commands run with CWD set to
-the directory holding `hooks.json`, so it is rewritten to `./`.
+the directory holding `hooks.json`, so it is rewritten to `./`. The same rewrite is
+applied to the staged `mcp_config.json`: the native importer copies a stdio server's
+path verbatim, so an unrewritten literal would leave the migrated server unstartable.
 
 ## 6. Compatibility matrix
 

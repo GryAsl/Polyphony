@@ -9,8 +9,15 @@ All notable changes to **Polyphony**. Format loosely follows
   `./codex/mcp_server.py`, which Claude Code resolves against the *session* working
   directory instead of the plugin, so every session failed with
   `can't open file '<cwd>\codex\mcp_server.py'`. The path now uses
-  `${CLAUDE_PLUGIN_ROOT}`, which both Claude Code and Codex substitute.
-- Add a manifest regression check rejecting host-relative `args` in `.mcp.json`.
+  `${CLAUDE_PLUGIN_ROOT}`, which Claude Code substitutes (verified) and which the
+  `codex` binary also carries; `cwd` stays `.` so delegation keeps defaulting to the
+  caller's workspace.
+- Rewrite `${CLAUDE_PLUGIN_ROOT}` to a relative path in the staged `mcp_config.json`
+  during migration, as already done for hooks. Antigravity never sets the variable and
+  the native importer copies a stdio server's path verbatim, so a migrated server would
+  otherwise be left with an unusable literal.
+- Add regression coverage for both: host-relative `args` in `.mcp.json`, and an
+  unrewritten plugin-root literal surviving `postprocess_staged`.
 
 ## 0.31.40 — Compact prompts and strict-mode helper exceptions
 
