@@ -28,6 +28,7 @@
 #                         (default: <file-dir>/<file-stem>.transcript.md)
 #       --convert         Auto-convert an unsupported audio format to wav first
 #                         (uses afconvert on macOS, else ffmpeg; writes next to the source)
+#       --focus-stdin     Read the optional focus/question from UTF-8 stdin
 #   -t, --tier <tier>     Delegation tier (default: pro — better at timestamps/diarization)
 #       --timeout <dur>   agy print-timeout (default: 30m; long media needs headroom)
 #       --print-command   Show the resolved agy-delegate call and exit (dry run)
@@ -67,6 +68,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o|--out)        need "$#" "$1"; OUT="$2"; shift 2 ;;
     --convert)       CONVERT=1; shift ;;
+    --focus-stdin)   FOCUS="$(cat)"; shift ;;
     -t|--tier)       need "$#" "$1"; TIER="$2"; shift 2 ;;
     --timeout)       need "$#" "$1"; TIMEOUT="$2"; shift 2 ;;
     --print-command) PRINT_CMD=1; shift ;;
@@ -188,7 +190,7 @@ if [ "$PRINT_CMD" -eq 1 ]; then
 fi
 
 echo "agy-media: delegating $(basename "$ABS") to agy ($TIER, timeout $TIMEOUT); full transcript -> $OUT" >&2
-"$DELEGATE" "${ARGS[@]}" "$PROMPT"
+printf '%s' "$PROMPT" | "$DELEGATE" "${ARGS[@]}" -
 rc=$?
 
 if [ "$rc" -eq 0 ] && [ ! -f "$OUT" ]; then

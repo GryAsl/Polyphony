@@ -160,10 +160,29 @@ class McpAdapterTests(unittest.TestCase):
         for expected in (
             "--tier", "flash-medium", "--model", "Exact Model", "--timeout", "7m",
             "--idle-timeout", "430", "--yolo", "--sandbox", "--digest",
-            "--mode", "accept-edits", "--conversation", "abc", "do it",
+            "--mode", "accept-edits", "--conversation", "abc", "-",
         ):
             self.assertIn(expected, argv)
         self.assertEqual(argv.count("--dir"), 2)
+        self.assertEqual(self.calls[-1][1]["input"], "do it")
+
+    def test_authored_unicode_prompts_use_utf8_stdin_not_windows_argv(self):
+        cases = (
+            ("delegate", {"prompt": "Türkçe 🏰 görev"}, "-"),
+            ("scout", {"question": "Dosyayı çözümle 🏰"}, "-"),
+            ("review", {"goal": "değişikliği incele 🏰"}, "--goal-stdin"),
+            ("research", {"query": "güncel araştırma 🏰"}, "-"),
+            ("media", {"file": "fixture.png", "focus": "görseli incele 🏰"}, "--focus-stdin"),
+            ("job", {"action": "start", "prompt": "arka plan görevi 🏰"}, "-"),
+            ("cost", {"prompt": "maliyet ölçümü 🏰"}, "-"),
+        )
+        for name, args, marker in cases:
+            with self.subTest(name=name):
+                mcp._dispatch(name, args)
+                argv, kwargs = self.calls[-1]
+                self.assertIn(marker, argv)
+                self.assertIn("🏰", kwargs.get("input", ""))
+                self.assertNotIn("🏰", " ".join(argv))
 
     def test_only_medium_high_and_pro_tiers_are_exposed(self):
         self.assertEqual(mcp.TIER["enum"], ["flash-medium", "flash", "pro"])

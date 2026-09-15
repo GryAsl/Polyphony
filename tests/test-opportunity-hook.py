@@ -25,6 +25,7 @@ class OpportunityHookTests(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["AGY_QUOTA_STATE_DIR"] = self.temp.name
         self.env["AGY_ROUTING_STATE_DIR"] = self.temp.name
+        self.env["POLYPHONY_UPDATE_CHECK"] = "off"
 
     def tearDown(self):
         self.temp.cleanup()
@@ -63,9 +64,9 @@ class OpportunityHookTests(unittest.TestCase):
             "prompt": choice,
         })
 
-    # --- 1. SessionStart / Pending Default ---
+    # --- 1. SessionStart / Soft Default ---
 
-    def test_session_start_initializes_pending_strict_default(self):
+    def test_session_start_initializes_soft_without_mode_question(self):
         session = str(uuid.uuid4())
         out = self.invoke({
             "hook_event_name": "SessionStart",
@@ -74,18 +75,10 @@ class OpportunityHookTests(unittest.TestCase):
         })
         data = json.loads(out)
         ctx = data["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Always use Agy (strict)", ctx)
-        self.assertIn("Use Agy when appropriate (soft)", ctx)
+        self.assertIn("Soft routing is active by default", ctx)
+        self.assertIn("Do not ask a routing-mode question", ctx)
 
-        # Confirm compact does not wipe state
-        self.set_mode(session, "Use Agy when appropriate (soft)")
-        compact_out = self.invoke({
-            "hook_event_name": "SessionStart",
-            "session_id": session,
-            "matcher": "compact",
-        })
-        self.assertEqual(compact_out, "")
-        # Tool call should now be in soft mode (advisory, not denied)
+        # Default soft is advisory rather than denying substantive native work.
         tool_out = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -95,11 +88,20 @@ class OpportunityHookTests(unittest.TestCase):
         tool_data = json.loads(tool_out)
         self.assertNotIn("permissionDecision", tool_data["hookSpecificOutput"])
 
-    # --- 2. Strict Default Before Answer & Stop Enforcement ---
+        # Confirm compact does not wipe state.
+        compact_out = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session,
+            "matcher": "compact",
+        })
+        self.assertEqual(compact_out, "")
 
-    def test_strict_default_denies_substantive_tools_before_answer(self):
+    # --- 2. No mandatory mode question ---
+
+    def test_missing_or_legacy_pending_state_normalizes_to_soft(self):
         session = str(uuid.uuid4())
-        # Without answering mode, calling Read should be denied
+        state_name = hashlib.sha256(session.encode("utf-8")).hexdigest()[:24] + ".json"
+        Path(self.temp.name, state_name).write_text(json.dumps({"mode": None}), encoding="utf-8")
         output = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -108,52 +110,100 @@ class OpportunityHookTests(unittest.TestCase):
         })
         data = json.loads(output)
         hook = data["hookSpecificOutput"]
-        self.assertEqual(hook["hookEventName"], "PreToolUse")
-        self.assertEqual(hook.get("permissionDecision"), "deny")
-        self.assertIn("Always use Agy (strict)", hook["permissionDecisionReason"])
+        self.assertNotIn("permissionDecision", hook)
 
-    def test_stop_enforces_exact_mode_question_when_pending(self):
+    def test_stop_never_forces_mode_question_in_default_soft(self):
         session = str(uuid.uuid4())
-
-        # 1. Stop without presenting choices should block
-        blocked = self.invoke({
+        allowed = self.invoke({
             "hook_event_name": "Stop",
             "session_id": session,
             "last_assistant_message": "I'm ready to help! What would you like to do?",
         })
-        data = json.loads(blocked)
-        self.assertEqual(data.get("decision"), "block")
-        self.assertIn("Always use Agy (strict)", data.get("reason", ""))
-        self.assertIn("Use Agy when appropriate (soft)", data.get("reason", ""))
-
-        # 2. Stop with clearly presented canonical choices should allow
-        allowed = self.invoke({
-            "hook_event_name": "Stop",
-            "session_id": session,
-            "last_assistant_message": (
-                "Before we begin, please select an Agy routing mode:\n"
-                "- Always use Agy (strict)\n"
-                "- Use Agy when appropriate (soft)"
-            ),
-        })
         self.assertEqual(allowed, "")
+
+    def test_explicit_mode_survives_session_end_and_resume_without_reasking(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Always use Agy (strict)")
+        self.invoke({"hook_event_name": "SessionEnd", "session_id": session})
+        resumed = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session,
+            "matcher": "resume",
+        })
+        self.assertNotIn("select", resumed.lower())
+        denied = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session,
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*.py"},
+        })
+        self.assertEqual(
+            json.loads(denied)["hookSpecificOutput"].get("permissionDecision"),
+            "deny",
+        )
+
+    def test_strict_allows_bounded_single_file_work_but_not_broad_work(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Always use Agy (strict)")
+        small_file = Path(self.temp.name, "small.py")
+        small_file.write_text("value = 1\n", encoding="utf-8")
+
+        bounded_calls = [
+            ("Read", {"file_path": str(small_file)}),
+            ("grep", {"path": str(small_file), "pattern": "value", "head_limit": 10}),
+            ("Edit", {
+                "file_path": str(small_file),
+                "old_string": "value = 1",
+                "new_string": "value = 2",
+            }),
+        ]
+        for tool_name, tool_input in bounded_calls:
+            with self.subTest(tool=tool_name):
+                self.assertEqual(self.invoke({
+                    "hook_event_name": "PreToolUse",
+                    "session_id": session,
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                }), "")
+
+        # Cheap host-side probes are orchestration, not substantive repository
+        # work; strict routing must not force them through a worker.
+        self.assertEqual(self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session,
+            "tool_name": "exec_command",
+            "tool_input": {
+                "cmd": 'python -c "import sys;print(len(sys.argv[1]))" "aaa bbb"',
+            },
+        }), "")
+
+        broad = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session,
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*.py"},
+        })
+        self.assertEqual(
+            json.loads(broad)["hookSpecificOutput"].get("permissionDecision"),
+            "deny",
+        )
 
     # --- 3. Strict Choice & Strict Denial for Major Categories ---
 
     def test_strict_choice_and_denial_for_each_major_category(self):
-        strict_synonyms = ["Always use Agy (strict)", "strict", "always", "7/24", "1"]
+        strict_synonyms = ["Always use Agy (strict)", "strict", "always", "7/24"]
         for syn in strict_synonyms:
             session = str(uuid.uuid4())
             out = self.set_mode(session, syn)
             self.assertIn("strict", out.lower())
 
-        # A question or negation is not an answer to the initial mode choice.
+        # A question or negation is not an explicit switch; default remains soft.
         for ambiguous in ("soft?", "do not use soft"):
             pending = str(uuid.uuid4())
             self.set_mode(pending, ambiguous)
             state_name = hashlib.sha256(pending.encode("utf-8")).hexdigest()[:24] + ".json"
             state = json.loads(Path(self.temp.name, state_name).read_text(encoding="utf-8"))
-            self.assertIsNone(state.get("mode"))
+            self.assertEqual(state.get("mode"), "soft")
 
         session = str(uuid.uuid4())
         self.set_mode(session, "Always use Agy (strict)")
@@ -628,7 +678,7 @@ class OpportunityHookTests(unittest.TestCase):
         corrupt_file = Path(self.temp.name, f"{safe_id}.json")
         corrupt_file.write_text("{corrupt: json content...", encoding="utf-8")
 
-        # Hook should recover gracefully to default pending state
+        # Hook should recover gracefully to the safe default soft state.
         output = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -636,7 +686,7 @@ class OpportunityHookTests(unittest.TestCase):
             "tool_input": {"file_path": "src/app.py"},
         })
         data = json.loads(output)
-        self.assertEqual(data["hookSpecificOutput"].get("permissionDecision"), "deny")
+        self.assertNotIn("permissionDecision", data["hookSpecificOutput"])
 
     # --- 12. Quota Behavior Remains Intact ---
 
@@ -1276,6 +1326,30 @@ class HookManifestPortabilityTests(unittest.TestCase):
                 )
                 self.assertEqual(completed.returncode, 0)
                 self.assertEqual(completed.stdout.strip(), "")
+
+    def test_nudge_treats_missing_legacy_state_as_default_soft(self):
+        if not self.bash_bin:
+            self.skipTest("No compatible shell exists; skipping shell-execution assertion")
+        nudge_script = ROOT / "hooks" / "nudge-delegation.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = os.environ.copy()
+            env["AGY_ROUTING_STATE_DIR"] = temp_dir
+            env["AGY_BRIDGE_PYTHON"] = sys.executable
+            completed = subprocess.run(
+                [self.bash_bin, str(nudge_script)],
+                env=env,
+                input=json.dumps({
+                    "session_id": "missing-state-default-soft",
+                    "prompt": "migrate across the entire codebase",
+                }),
+                text=True,
+                encoding="utf-8",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn("THE JUDGMENT IS YOURS", completed.stdout)
 
 
 if __name__ == "__main__":

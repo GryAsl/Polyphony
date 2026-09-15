@@ -39,7 +39,11 @@ while [ $# -gt 0 ]; do
     *)         break ;;
   esac
 done
-PROMPT="${*:-}"
+if [ "${1:-}" = "-" ] && [ "$#" -eq 1 ]; then
+  PROMPT="$(cat)"
+else
+  PROMPT="${*:-}"
+fi
 [ -n "$PROMPT" ] || { echo "usage: agy-cost-compare.sh [-t tier] [--yolo] \"task\"" >&2; exit 1; }
 case "$TIER" in flash-medium|flash|pro) ;; *) echo "tier must be flash-medium, flash, or pro" >&2; exit 1 ;; esac
 

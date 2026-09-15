@@ -62,8 +62,8 @@ if AGY_DELEGATE="$STUB" AGY_CAPTURE="$CAP" "$REVIEW" --dir "$REPO" --goal "only 
     || bad "untracked warning"
   [ "$(cat "$CAP.cwd")" = "$REPO" ] && ok "review stays in the selected repository" \
     || bad "review working directory"
-  has "$CAP.args" --idle-timeout && has "$CAP.args" 180 \
-    && ok "review has a bounded idle timeout" || bad "review idle timeout"
+  lacks "$CAP.args" --idle-timeout \
+    && ok "review inherits the hard-deadline idle policy" || bad "review idle timeout"
 else
   bad "worktree review exits zero"
 fi
@@ -80,7 +80,7 @@ fi
 CAP="$TMP/scout"
 if AGY_DELEGATE="$STUB" AGY_CAPTURE="$CAP" "$SCOUT" --dir "$REPO" "trace the fixture" >"$CAP.out" 2>"$CAP.err"; then
   has "$CAP.args" flash && has "$CAP.args" plan && has "$CAP.args" 30m && has "$CAP.args" "$REPO" \
-    && has "$CAP.args" 'READ-ONLY repository investigation' && has "$CAP.args" 'NEXT_LIKELY_GAP' \
+    && has "$CAP.stdin" 'READ-ONLY repository investigation' && has "$CAP.stdin" 'NEXT_LIKELY_GAP' \
     && ok "scout builds the fixed read-only Flash contract" || bad "scout contract"
   has "$CAP.out" 'DIGEST: scout saw the fixture' && ok "scout returns only its digest" \
     || bad "scout output"

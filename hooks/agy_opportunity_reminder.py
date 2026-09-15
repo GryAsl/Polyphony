@@ -4,9 +4,9 @@
 Supports:
 - Always use Agy (strict): Gated native substantive tool execution, mandatory Agy delegation.
 - Use Agy when appropriate (soft): Non-blocking advisory reminders, once per category per turn.
-- Default: Sessions begin with routing mode unanswered and effective strict behavior.
-- Stop enforcement: Enforces presenting the mode question when pending, and successful completed
-  Agy work on substantive strict turns with loop bounding.
+- Default: Sessions begin in soft mode and never require a routing question.
+- Stop enforcement: Requires successful completed Agy work only on substantive strict turns,
+  with bounded local exceptions and loop protection.
 """
 
 from __future__ import annotations
@@ -20,6 +20,14 @@ import re
 import shlex
 import sys
 import tempfile
+
+SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+try:
+    from polyphony_update import check_for_update
+except Exception:  # Update checks are best-effort and must never break routing.
+    check_for_update = None
 
 
 APPROVED_AGY_WRAPPERS = {
@@ -72,6 +80,16 @@ POLICY_FILES = {"claude.md", "agents.md"}
 # stay below 800 words even when assembled in a task file or delivered via stdin.
 DEFAULT_AGY_PROMPT_MAX_CHARS = 24000
 DEFAULT_AGY_PROMPT_MAX_WORDS = 799
+
+# Strict is a routing guarantee for substantive work, not a blanket host lock.
+# Permit a very small, single-file conductor operation without Agy so the main
+# agent can inspect or correct a bounded detail without entering a delegation
+# loop. Broad discovery, writes, tests, Git, networking and native agents remain
+# gated exactly as before.
+STRICT_NATIVE_MAX_OPS = 3
+STRICT_NATIVE_MAX_READ_LINES = 200
+STRICT_NATIVE_MAX_GREP_RESULTS = 50
+STRICT_NATIVE_MAX_EDIT_CHARS = 800
 
 CLAUDE_ONLY_TOOLS = {
     "askuserquestion", "enterplanmode", "exitplanmode", "skill", "toolsearch",
@@ -131,8 +149,8 @@ REMINDERS = {
 }
 
 DENIAL_INSTRUCTIONS = {
-    "discovery": "Strict mode: repository, code, and document discovery must use `agy-scout` (or Codex `mcp__antigravity__scout`). Native read/search is denied.",
-    "implementation": "Strict mode: file and code edits must use `agy-delegate` (or Codex `mcp__antigravity__delegate`) with `--tier flash`. Native write/edit is denied.",
+    "discovery": "Strict mode: broad repository, code, and document discovery must use `agy-scout` (or Codex `mcp__antigravity__scout`). This call is outside the bounded single-file native allowance.",
+    "implementation": "Strict mode: substantive file and code edits must use `agy-delegate` (or Codex `mcp__antigravity__delegate`) with `--tier flash`. This call is outside the short single-file replacement allowance.",
     "review": "Strict mode: diff and code review must use `agy-review` (or Codex `mcp__antigravity__review`). Native diff/show is denied.",
     "verification": "Strict mode: test/build/lint and log diagnosis must use `agy-delegate` (or Codex `mcp__antigravity__delegate`). Native test/build execution is denied.",
     "git": "Strict mode: Git operations must use `agy-delegate` (or Codex `mcp__antigravity__delegate`). Native Git execution is denied.",
@@ -142,28 +160,37 @@ DENIAL_INSTRUCTIONS = {
     "terminal": "Strict mode: general terminal automation must use `agy-delegate` (or Codex `mcp__antigravity__delegate`). Native shell execution is denied.",
 }
 
-PENDING_DENIAL_INSTRUCTION = (
-    "Agy routing mode selection is pending. Substantive work is denied until the user chooses:\n"
-    "- Always use Agy (strict)\n"
-    "- Use Agy when appropriate (soft)\n"
-    "Ask the user to select a mode first."
-)
-
 SESSION_START_CONTEXT = (
-    "[Agy routing] Routing mode is unanswered. Strict routing is effective: all substantive work must be routed to Agy.\n"
-    "At the first user-facing turn, ask the user exactly one concise question with these visible choices:\n"
-    "- Always use Agy (strict)\n"
-    "- Use Agy when appropriate (soft)\n"
-    "Keep the user's substantive request in mind and resume it immediately after the choice."
+    "[Agy routing] Soft routing is active by default. Do not ask a routing-mode question. "
+    "Use Agy when it is useful and keep native execution available. Switch to strict only after "
+    "an explicit user request; an explicit soft/strict choice remains valid when the session resumes."
 )
 
-PENDING_PROMPT_CONTEXT = (
-    "[Agy routing] Routing mode is unanswered. Strict routing is effective: all substantive work must be routed to Agy.\n"
-    "Before performing substantive work, ask the user to select a routing mode:\n"
-    "- Always use Agy (strict)\n"
-    "- Use Agy when appropriate (soft)\n"
-    "Keep the user's substantive request in mind and resume it immediately after the choice."
-)
+
+def _polyphony_update_context() -> str:
+    if str(os.environ.get("POLYPHONY_UPDATE_CHECK", "on")).strip().lower() in {"0", "false", "no", "off"}:
+        return ""
+    if check_for_update is None:
+        return ""
+    try:
+        result = check_for_update()
+    except Exception:
+        return ""
+    if not result.get("notify") or not result.get("available"):
+        return ""
+    current = result.get("current") or "unknown"
+    latest = result.get("latest") or "unknown"
+    url = result.get("url") or "https://github.com/GryAsl/Polyphony/releases"
+    return (
+        f"[Polyphony update] A newer Polyphony release is available: installed {current}, latest {latest}. "
+        "Ask the user exactly one concise question: update Polyphony now? Do not update without explicit approval. "
+        "After approval, use the host's matching command: Claude Code `claude plugin update antigravity@polyphony -y` "
+        "then reload/restart; inside Claude's UI use `/plugin marketplace update polyphony` then `/reload-plugins`. "
+        "Codex uses `codex plugin marketplace upgrade polyphony` then "
+        "`codex plugin add antigravity@polyphony`. Verify the installed version after the command. "
+        "Tell the user that a new Claude session/reload or a new Codex task is required for the updated plugin "
+        f"to be loaded. Release notes: {url}"
+    )
 
 
 def _load_input() -> dict:
@@ -200,11 +227,13 @@ def _session_state_path(session_id: str) -> Path:
 
 def _default_state() -> dict:
     return {
-        "mode": None,
+        "mode": "soft",
         "question_presented": False,
         "turn_id": "",
         "is_substantive": False,
         "native_helper_used": False,
+        "native_small_ops": 0,
+        "native_small_path": "",
         "agy_attempted": False,
         "agy_success": False,
         "agy_failed": False,
@@ -228,6 +257,11 @@ def _read_state(session_id: str) -> dict:
                         state[k] = v
     except Exception:
         pass
+    # Old/corrupt state files used mode=null to mean a mandatory strict-default
+    # question. Treat them as soft so an update, cache reset or partial write can
+    # never resurrect the repeated-question gate.
+    if state.get("mode") not in {"strict", "soft"}:
+        state["mode"] = "soft"
     return state
 
 
@@ -493,6 +527,104 @@ def _small_local_helper(tool_name: str, tool_input: dict) -> bool:
             return False
     # Arguments must be literal shell text; prohibit expansion/control outside quotes.
     return not _has_unquoted_shell_control(command) and "$(" not in command and "`" not in command
+
+
+def _bounded_native_path(data: dict, path: str) -> Path | None:
+    """Resolve a literal path only for small-operation sizing; never create it."""
+    if not path or any(char in path for char in "*?[]\r\n"):
+        return None
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        cwd = data.get("cwd") or data.get("working_directory") or data.get("workingDirectory")
+        candidate = Path(cwd).expanduser() / candidate if isinstance(cwd, str) and cwd else Path.cwd() / candidate
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _is_sensitive_small_edit(path: str) -> bool:
+    normalized = path.replace("/", "\\").lower()
+    name = Path(path).name.lower()
+    return (
+        name in POLICY_FILES
+        or name.startswith(".env")
+        or name.endswith((".lock", ".pem", ".key", ".pfx", ".p12"))
+        or any(part in normalized for part in (
+            "\\.git\\", "\\.github\\", "\\hooks\\", "\\auth", "\\security",
+            "\\permissions", "\\settings", "\\manifest", "\\secrets",
+        ))
+    )
+
+
+def _bounded_native_operation(data: dict, tool_name: str, tool_input: dict, state: dict) -> str | None:
+    """Return the single touched path for a tiny strict-mode conductor operation.
+
+    This is deliberately narrow and measurable: at most three operations on one
+    file per turn. It lets strict mode tolerate a compact spot-check or one small
+    replacement while preserving Agy enforcement for broad/substantive work.
+    """
+    try:
+        used = int(state.get("native_small_ops") or 0)
+    except (TypeError, ValueError):
+        used = STRICT_NATIVE_MAX_OPS
+    if used >= STRICT_NATIVE_MAX_OPS:
+        return None
+
+    lowered = tool_name.lower()
+    path = _path_from(tool_input)
+    resolved = _bounded_native_path(data, path)
+    if resolved is None:
+        return None
+    normalized = os.path.normcase(str(resolved))
+    previous = str(state.get("native_small_path") or "")
+    if previous and previous != normalized:
+        return None
+
+    if lowered == "read":
+        limit = tool_input.get("limit") or tool_input.get("line_limit") or tool_input.get("lineLimit")
+        if limit is not None:
+            try:
+                if not 0 < int(limit) <= STRICT_NATIVE_MAX_READ_LINES:
+                    return None
+            except (TypeError, ValueError):
+                return None
+        else:
+            try:
+                # A small file is bounded even when the host Read tool omits a
+                # line limit. Larger/unknown files still go through Agy.
+                if not resolved.is_file() or resolved.stat().st_size > 32_768:
+                    return None
+            except OSError:
+                return None
+        return normalized
+
+    if lowered == "grep":
+        # Native grep is exempt only when scoped to one literal file and a small
+        # result cap. Directory scans and Glob remain Agy work.
+        if not resolved.is_file():
+            return None
+        cap = tool_input.get("head_limit") or tool_input.get("headLimit") or tool_input.get("limit")
+        try:
+            if cap is None or not 0 < int(cap) <= STRICT_NATIVE_MAX_GREP_RESULTS:
+                return None
+        except (TypeError, ValueError):
+            return None
+        pattern = tool_input.get("pattern")
+        return normalized if isinstance(pattern, str) and 0 < len(pattern) <= 200 else None
+
+    if lowered == "edit":
+        if not resolved.is_file() or _is_sensitive_small_edit(path) or tool_input.get("replace_all"):
+            return None
+        before = tool_input.get("old_string")
+        after = tool_input.get("new_string")
+        if not isinstance(before, str) or not isinstance(after, str) or not before:
+            return None
+        if len(before) + len(after) > STRICT_NATIVE_MAX_EDIT_CHARS:
+            return None
+        return normalized
+
+    return None
 
 
 def _agy_prompt_budget_violation(tool_name: str, tool_input: dict) -> str | None:
@@ -1340,18 +1472,40 @@ def handle_session_start(data: dict, session_id: str) -> None:
     if "compact" in {matcher, source, trigger} or compact_flag:
         return
 
-    state = _default_state()
-    # SessionStart already injects the single routing-choice prompt. Mark it
-    # as presented so UserPromptSubmit does not inject a second copy in the
-    # same opening turn (which previously produced duplicate Turkish/English
-    # questions in Claude desktop).
-    state["question_presented"] = True
+    # Preserve an explicit per-session choice across resume/plugin reconnects.
+    # A missing or legacy pending state is normalized to soft by _read_state.
+    # Clear intentionally starts fresh, which now also means soft and requires
+    # no question. Repeated SessionStart events therefore cannot reset strict or
+    # resurrect the old mandatory-choice loop.
+    state = _read_state(session_id)
+    if "clear" in {matcher, source, trigger}:
+        state = _default_state()
+    state["turn_id"] = ""
+    state["is_substantive"] = False
+    state["native_helper_used"] = False
+    state["native_small_ops"] = 0
+    state["native_small_path"] = ""
+    state["agy_attempted"] = False
+    state["agy_success"] = False
+    state["agy_failed"] = False
+    state["last_agy_error"] = ""
+    state["denied_categories"] = []
+    state["warned_categories"] = []
+    state["continuation_count"] = 0
+    state["user_mode_selection"] = False
     _write_state(session_id, state)
-    _emit_context("SessionStart", SESSION_START_CONTEXT)
+    update_context = _polyphony_update_context()
+    context = f"{SESSION_START_CONTEXT}\n\n{update_context}" if update_context else SESSION_START_CONTEXT
+    _emit_context("SessionStart", context)
 
 
 def handle_session_end(session_id: str) -> None:
-    _delete_state(session_id)
+    # Keep only the session-level mode so reopening/resuming the same session
+    # cannot ask again or silently lose an explicit strict choice.
+    state = _read_state(session_id)
+    preserved = _default_state()
+    preserved["mode"] = state.get("mode") if state.get("mode") in {"strict", "soft"} else "soft"
+    _write_state(session_id, preserved)
 
 
 def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id: str) -> None:
@@ -1360,6 +1514,8 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
     state["turn_id"] = turn_id
     state["is_substantive"] = False
     state["native_helper_used"] = False
+    state["native_small_ops"] = 0
+    state["native_small_path"] = ""
     state["agy_attempted"] = False
     state["agy_success"] = False
     state["agy_failed"] = False
@@ -1370,64 +1526,39 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
     state["user_mode_selection"] = False
 
     current_mode = state.get("mode")
+    if current_mode not in {"strict", "soft"}:
+        current_mode = "soft"
+        state["mode"] = current_mode
     context_to_emit = ""
 
-    if current_mode is None:
-        mode_target, is_sole = parse_mode_selection_intent(prompt)
-        if mode_target == "strict":
-            state["mode"] = "strict"
-            state["user_mode_selection"] = is_sole
-            state["is_substantive"] = not is_sole
-            context_to_emit = (
-                "[Agy routing] Switched Agy routing mode to strict. "
-                "All substantive work must be delegated to Antigravity and produce a successful result before completing the turn."
-            )
-        elif mode_target == "soft":
-            state["mode"] = "soft"
-            state["user_mode_selection"] = is_sole
-            state["is_substantive"] = not is_sole
-            context_to_emit = (
-                "[Agy routing] Switched Agy routing mode to soft. "
-                "Substantive work may be completed natively or delegated. Delegation reminders are advisory."
-            )
-        else:
-            if state.get("question_presented"):
-                # The SessionStart context already asked for the one choice;
-                # do not repeat it when the first user prompt arrives.
-                context_to_emit = ""
-            else:
-                context_to_emit = PENDING_PROMPT_CONTEXT
+    # Canonical labels remain valid explicit commands even though the plugin no
+    # longer asks a mandatory first-turn question.
+    mode_target, is_sole = parse_mode_selection_intent(prompt)
+    if mode_target == "strict":
+        state["mode"] = "strict"
+        state["user_mode_selection"] = is_sole
+        state["is_substantive"] = not is_sole
+        context_to_emit = (
+            "[Agy routing] Switched Agy routing mode to strict. "
+            "Substantive Agy-capable work must be delegated; bounded single-file checks, tiny corrections, local orchestration, and host-only capabilities remain available natively."
+        )
+    elif mode_target == "soft":
+        state["mode"] = "soft"
+        state["user_mode_selection"] = is_sole
+        state["is_substantive"] = not is_sole
+        context_to_emit = (
+            "[Agy routing] Switched Agy routing mode to soft. "
+            "Substantive work may be completed natively or delegated. Delegation reminders are advisory."
+        )
     else:
-        mode_target, is_sole = parse_mode_switch_intent(prompt)
-        if mode_target == "strict":
-            state["mode"] = "strict"
-            state["user_mode_selection"] = is_sole
-            state["is_substantive"] = not is_sole
-            context_to_emit = (
-                "[Agy routing] Switched Agy routing mode to strict. "
-                "All substantive work must be delegated to Antigravity and produce a successful result before completing the turn."
-            )
-        elif mode_target == "soft":
-            state["mode"] = "soft"
-            state["user_mode_selection"] = is_sole
-            state["is_substantive"] = not is_sole
-            context_to_emit = (
-                "[Agy routing] Switched Agy routing mode to soft. "
-                "Substantive work may be completed natively or delegated. Delegation reminders are advisory."
-            )
-        else:
-            if state["mode"] == "strict" and not _is_control_plane_prompt(prompt):
-                state["is_substantive"] = True
+        if state["mode"] == "strict" and not _is_control_plane_prompt(prompt):
+            state["is_substantive"] = True
 
     _write_state(session_id, state)
 
-    quota = _quota_context()
-    if quota and context_to_emit:
-        _emit_context("UserPromptSubmit", f"{context_to_emit}\n\n{quota}")
-    elif quota:
-        _emit_context("UserPromptSubmit", quota)
-    elif context_to_emit:
-        _emit_context("UserPromptSubmit", context_to_emit)
+    contexts = [value for value in (context_to_emit, _quota_context(), _polyphony_update_context()) if value]
+    if contexts:
+        _emit_context("UserPromptSubmit", "\n\n".join(contexts))
 
 
 def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
@@ -1468,7 +1599,7 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
         return
 
     mode = state.get("mode")
-    effective_strict = (mode is None or mode == "strict")
+    effective_strict = mode == "strict"
     quota_context = _quota_context()
 
     if category == "external":
@@ -1496,13 +1627,23 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
         return
 
     if effective_strict:
+        small_path = _bounded_native_operation(data, tool_name, tool_input, state)
+        if small_path is not None:
+            state["native_helper_used"] = True
+            state["native_small_ops"] = int(state.get("native_small_ops") or 0) + 1
+            state["native_small_path"] = small_path
+            _write_state(session_id, state)
+            return
         state["is_substantive"] = True
         denied = set(state.get("denied_categories") or [])
         denied.add(category)
         state["denied_categories"] = sorted(denied)
         _write_state(session_id, state)
 
-        instruction = PENDING_DENIAL_INSTRUCTION if mode is None else DENIAL_INSTRUCTIONS.get(category, PENDING_DENIAL_INSTRUCTION)
+        instruction = DENIAL_INSTRUCTIONS.get(
+            category,
+            "Strict mode: this substantive operation must be routed through an Agy worker. Native execution is denied.",
+        )
         if quota_context:
             instruction = f"{instruction}\n\n{quota_context}"
         _emit_deny("PreToolUse", instruction)
@@ -1540,11 +1681,10 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
     if not isinstance(tool_input, dict):
         tool_input = {}
 
-    # AskUserQuestion answers arrive here in Claude Code desktop. Previously
-    # this handler returned immediately because the event was not an Agy work
-    # call, leaving mode=None and causing every following Bash/Glob call to be
-    # denied as "routing mode selection is pending". Persist the answer before
-    # evaluating substantive Agy work so the very next tool sees the choice.
+    # AskUserQuestion answers may still be used for an explicit mode change in
+    # Claude Code desktop. Persist that answer before evaluating substantive Agy
+    # work so the very next tool sees the choice; this path is optional now that
+    # sessions default to soft without a mandatory question.
     normalized_tool = re.sub(r"[^a-z0-9]", "", tool_name.lower())
     if event == "PostToolUse" and normalized_tool in MODE_SELECTION_TOOLS:
         selected_mode = _extract_mode_from_answer(data)
@@ -1602,19 +1742,9 @@ def handle_stop(data: dict, state: dict, session_id: str) -> None:
 
     mode = state.get("mode")
 
-    if mode is None:
-        last_message = _extract_last_message(data)
-        if _presents_mode_choices(last_message):
-            state["question_presented"] = True
-            _write_state(session_id, state)
-            return
-        state["continuation_count"] = continuation_count + 1
+    if mode not in {"strict", "soft"}:
+        state["mode"] = "soft"
         _write_state(session_id, state)
-        _emit_stop_block(
-            "You must ask the user to select the Agy routing mode before stopping. Clearly present both visible choices:\n"
-            "- Always use Agy (strict)\n"
-            "- Use Agy when appropriate (soft)"
-        )
         return
 
     if mode == "soft":
@@ -1665,6 +1795,8 @@ def main():
         state["turn_id"] = turn_id
         state["is_substantive"] = False
         state["native_helper_used"] = False
+        state["native_small_ops"] = 0
+        state["native_small_path"] = ""
         state["agy_attempted"] = False
         state["agy_success"] = False
         state["agy_failed"] = False
