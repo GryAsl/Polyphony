@@ -46,6 +46,7 @@
 #             |    agy 1.1.3's soft deny (rc 0, empty stdout) and 1.1.13's hard error
 #             |    (rc 1, "user denied permission"). Add a permissions.allow rule, or --yolo
 #             | 16 Windows ConPTY bridge/Python unavailable
+#             | 19 selected Gemini model has no server capacity (503)
 #
 # On a classifiable failure, a machine-readable line is printed to stderr so
 # orchestrators (e.g. agy-job.sh) can react without scraping prose:
@@ -904,6 +905,13 @@ $blob"
       shopt -u nocasematch; permission_denied shown ;;
     *quota*|*"rate limit"*|*"resource exhausted"*)
       shopt -u nocasematch; signal QUOTA_EXHAUSTED "non-Gemini agy quota / rate limit"; exit 10 ;;
+    *"no capacity available for model"*|*"unavailable (code 503)"*)
+      # agy already performs its own bounded API retries (the diagnostic reports
+      # the final attempt). Classify exhausted server capacity instead of adding
+      # another expensive wrapper retry or confusing it with account quota.
+      shopt -u nocasematch
+      signal CAPACITY_UNAVAILABLE "Gemini service has no capacity for the selected model; retry later or ask before changing models"
+      exit 19 ;;
     *unauthenticated*|*unauthorized*|*"sign in"*|*"please authenticate"*|*reauth*)
       shopt -u nocasematch; signal AUTH_REQUIRED "agy not authenticated — run \`agy\` once"; exit 11 ;;
     *"timed out"*|*"deadline exceeded"*|*"print-timeout"*)

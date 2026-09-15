@@ -66,11 +66,11 @@ Start a new Codex task after installation. The plugin provides direct MCP tools 
 
 Polyphony provides two session-level routing modes:
 
-- **Always use Agy (strict)**: Substantive native tool calls (discovery, code edits, diff review, tests/build/lint diagnosis, Git operations, web research, media analysis, native subagents, and general terminal automation) are blocked with PreToolUse denials. The turn requires a completed, successful Agy work call (exit code 0 with non-empty output) before stopping. External or unproven connectors remain advisory.
+- **Always use Agy (strict)**: Broad or substantive Agy-capable work (discovery, implementation, review, tests/build/lint diagnosis, Git operations, research, media analysis, native subagents, and general automation) is routed through Agy. Tiny local helpers plus up to three bounded operations on one small file remain available to the host, as do host-only connectors. A substantive delegated turn requires a completed, successful Agy result before stopping.
 - **Use Agy when appropriate (soft)**: Non-blocking advisory reminders; native execution remains permitted.
 
-The choice is made at session start and controls how the host agent divides work between
-itself and Agy/Gemini workers:
+Soft is the default. The mode controls how the host agent divides work between itself and
+Agy/Gemini workers:
 
 - **Soft** keeps the workflow flexible. The host decides case by case whether delegation
   is worthwhile, so small or simple requests can stay with the host agent.
@@ -82,12 +82,9 @@ itself and Agy/Gemini workers:
   <img src="docs/agy-routing-modes.png" alt="Polyphony soft and strict routing mode selection" width="900">
 </p>
 
-**Default & session start:** Newly started, resumed, cleared, or forked sessions begin with routing mode unanswered and effective strict behavior (preserved across compact). At the first user-facing turn, the agent asks exactly one concise question presenting both canonical choices:
-- Always use Agy (strict)
-- Use Agy when appropriate (soft)
-The user's initial substantive request remains in conversation and is resumed immediately after the choice.
+**Default & session start:** New sessions start in soft mode without asking a routing question. An explicit strict or soft choice is preserved across compact, reconnect, and resume events for that session; clearing starts fresh in soft mode. This prevents hook reloads or missing legacy state from reopening the old mode-choice loop.
 
-**Control-plane exceptions:** Presenting the mode question, mode changes, quota checks/choices, job/trace/doctor/cancel management, bootstrap policy reading, and conversational user interaction are exempt from delegation gating.
+**Control-plane exceptions:** Mode changes, quota checks/choices, job/trace/doctor/cancel management, bootstrap policy reading, bounded local conductor checks, and conversational user interaction are exempt from delegation gating.
 
 **Manual switching:** Explicitly switch anytime with unambiguous phrasing such as "switch Agy mode to strict" or "set Agy mode to soft".
 
@@ -169,6 +166,24 @@ evidence, preventing a delegation promise from being mistaken for completed work
 
 The tracker emits a one-time notice when either window crosses 75%, 50%, 25%, or 10%
 remaining. A threshold is not announced again until that quota window resets above it.
+
+## Polyphony update checks
+
+While Polyphony is in use, its `SessionStart`/`UserPromptSubmit` hooks perform a best-effort
+GitHub release check at most once per day by default. The check is read-only: it never
+updates itself and never runs an install command without the user's explicit approval.
+When a newer release is found, the host agent asks whether to update and shows the exact
+host-specific commands. Claude Code uses `claude plugin update antigravity@polyphony -y` followed
+by a reload/restart (or `/plugin marketplace update polyphony` then `/reload-plugins` inside its
+UI); Codex uses `codex plugin marketplace upgrade polyphony` followed by
+`codex plugin add antigravity@polyphony`. After updating, verify the installed version and
+reload/start a new Claude session or start a new Codex task so the new plugin is loaded.
+
+The interval can be changed with `POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS`; the network
+timeout defaults to four seconds and can be changed with
+`POLYPHONY_UPDATE_CHECK_TIMEOUT_SECONDS`. A failed check is silent and retried at the next
+interval. The manual `/antigravity:update` command follows the same approval rule.
+Set `POLYPHONY_UPDATE_CHECK=off` to disable these automatic checks.
 
 ## Permissions and troubleshooting
 

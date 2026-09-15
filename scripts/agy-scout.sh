@@ -30,6 +30,7 @@ while [ "$#" -gt 0 ]; do
     --timeout) need "$@"; TIMEOUT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     --*)       die "unknown option: $1" ;;
+    -)         QUESTION="$(cat)"; shift; [ "$#" -eq 0 ] || die "stdin marker must be the final argument" ;;
     *)         QUESTION="$1"; shift; [ "$#" -eq 0 ] || die "quote the question as one argument" ;;
   esac
 done
@@ -53,7 +54,7 @@ DIGEST: one-sentence answer
 Use at most eight short bullets total and plain path:line references (no Markdown links).
 Do not paste full methods, files, raw logs, or propose a patch unless the question explicitly asks for design options."
 
-OUT="$(AGY_DELEGATE_READ_ONLY=1 "$DELEGATE" --tier "$TIER" --mode plan --digest --timeout "$TIMEOUT" --dir "$DIR" "$PROMPT")"
+OUT="$(printf '%s' "$PROMPT" | AGY_DELEGATE_READ_ONLY=1 "$DELEGATE" --tier "$TIER" --mode plan --digest --timeout "$TIMEOUT" --dir "$DIR" -)"
 RC=$?
 [ "$RC" -eq 0 ] || { echo "agy-scout: delegation failed (exit $RC)" >&2; exit "$RC"; }
 

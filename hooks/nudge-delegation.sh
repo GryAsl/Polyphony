@@ -40,7 +40,7 @@ else
 fi
 
 # Must have a usable session id; if none, emit nothing and exit cleanly
-# so it cannot contradict strict/pending enforcement.
+# so it cannot attach state to an unrelated session.
 SESSION_ID="$(printf '%s' "$IN" | "${PY_CMD[@]}" -c 'import json,sys
 try:
     val = json.load(sys.stdin).get("session_id")
@@ -64,13 +64,13 @@ if not d:
 p = os.path.join(d, f"{h}.json")
 try:
     s = json.load(open(p, encoding="utf-8"))
-    print(s.get("mode") or "pending")
+    print(s.get("mode") if s.get("mode") in ("strict", "soft") else "soft")
 except Exception:
-    print("pending")' "$SESSION_ID" 2>/dev/null || true )"
+    print("soft")' "$SESSION_ID" 2>/dev/null || true )"
 
-# When strict mode is active or pending, strict routing is enforced by agy_opportunity_reminder.py.
+# When strict mode is active, strict routing is enforced by agy_opportunity_reminder.py.
 # Do not emit contradictory "THE JUDGMENT IS YOURS" context; defer to the active mode.
-if [ "$ACTIVE_MODE" = "strict" ] || [ "$ACTIVE_MODE" = "pending" ]; then
+if [ "$ACTIVE_MODE" = "strict" ]; then
   exit 0
 fi
 

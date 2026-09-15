@@ -60,6 +60,7 @@ rc_label() {
     # Both denial shapes: agy 1.1.3's soft deny and 1.1.13's hard error.
     15) echo 'PERMISSION denied (soft on 1.1.3+, a hard error by 1.1.13) — add a permissions.allow rule, or --yolo' ;;
     16) echo 'Windows ConPTY bridge unavailable — check Python, vendored bridge, and pywinpty' ;;
+    19) echo 'CAPACITY unavailable — selected Gemini model returned 503; retry later or ask before changing models' ;;
     *)  echo 'error' ;;
   esac
 }
@@ -81,6 +82,14 @@ case "$cmd" in
   start)
     [ $# -ge 1 ] || die "start needs delegate args, e.g.  start --tier pro \"task\""
     [ -x "$DELEGATE" ] || die "delegate not executable: $DELEGATE"
+    if [ "${!#}" = "-" ]; then
+      _args=("$@")
+      _last=$(( ${#_args[@]} - 1 ))
+      unset '_args[_last]'
+      _prompt="$(cat)"
+      [ -n "$_prompt" ] || die "stdin task is empty"
+      set -- "${_args[@]}" "$_prompt"
+    fi
     id="$(date +%Y%m%d-%H%M%S)-$$-${RANDOM}"
     jd="$REG/$id"; mkdir -p "$jd"
     { echo "id=$id"; echo "cwd=$PWD"; echo "started=$(date -u +%FT%TZ 2>/dev/null || date)";

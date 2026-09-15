@@ -25,20 +25,13 @@ Polyphony provides two session-level routing modes:
 - **Always use Agy (strict)**: Substantive Agy-capable work (discovery, implementation/edits, diff review, tests/build/lint diagnosis, Git operations, web research, media analysis, subagents, and general terminal automation) is gated and must be delegated to Antigravity wrappers or MCP tools. Substantive turns require a completed, successful Agy work call (exit code 0, non-empty output).
 - **Use Agy when appropriate (soft)**: Non-blocking advisory reminders; native execution remains permitted.
 
-**Default & session start:** Newly started, resumed, cleared, or forked sessions begin with routing mode unanswered and effective strict behavior (preserved across compact). At the first user-facing turn, the agent must ask exactly one concise question presenting both visible choices:
-- Always use Agy (strict)
-- Use Agy when appropriate (soft)
-The user's initial substantive request is kept in conversation and resumed immediately after the choice.
+**Default & session start:** New sessions start in `Use Agy when appropriate (soft)` without asking a routing question. An explicit strict or soft choice persists across compact, reconnect, and resume events for that session; clear starts fresh in soft mode. Never repeat the question because a hook reloaded, MCP disconnected, or legacy state is missing.
 
-The Claude desktop `AskUserQuestion` answer is recorded from its `PostToolUse` result. Do not
-restate the choice as a substantive request or expect a plain `UserPromptSubmit`; the hook persists
-the selected mode before the next tool call.
-
-**Control-plane exceptions:** Presenting the mode question, mode recording/changes, quota checks/choices, job/trace/doctor/cancel management, reading bootstrap policy/config, and user interaction are exempt from delegation gating.
+**Control-plane exceptions:** Mode recording/changes, quota checks/choices, job/trace/doctor/cancel management, reading bootstrap policy/config, bounded local conductor checks, and user interaction are exempt from delegation gating.
 
 **Compact task contracts (Claude and Codex, all effort levels):** Aim for 200–500 words and keep the total authored instructions strictly below 800 words. At 800 words, stop and summarize before launching or writing more. Count all pieces of the same prompt together; stdin, task files, and multiple writes are not exemptions. Reference paths and desired outcomes instead of pasting code or step-by-step implementation. Split genuinely independent tasks when useful; never split one oversized prompt merely to evade the cap. Wrapper-generated review diffs are source data and retain their separate size limit.
 
-**Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. Host-only tools without equivalent Agy access remain advisory. Substantive discovery, implementation, review, tests and Git mutations still require Agy; a short command or the word `python` alone does not make substantive work exempt.
+**Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. The host may also perform at most three bounded operations on one small file per turn (a small/chunked read, capped single-file grep, or one short non-sensitive replacement). Host-only tools without equivalent Agy access remain advisory. Broad discovery, implementation, review, tests and Git mutations still require Agy; command length or the word `python` alone does not make substantive work exempt.
 
 **Timeout discipline:** Use at least the default **30-minute** hard timeout for real work;
 choose **45–60 minutes** for broad multi-file, Unity, or build-heavy delegations. Reserve
@@ -172,7 +165,10 @@ native Claude subagent merely to forward one Gemini call. Use the
 **`antigravity-delegate` subagent** only when its isolated context or restricted tool
 boundary materially helps. Either way, *you* still own verification.
 
-**Structured failures and quota control.** On a failed, empty, or timed-out Gemini run,
+**Structured failures and quota control.** A final Gemini `UNAVAILABLE (code 503): No capacity available`
+response is `CAPACITY_UNAVAILABLE` (exit 19) after agy's own bounded retries. Treat it as
+temporary service capacity, not account quota or an invalid model; retry later or ask
+before changing models. On a failed, empty, or timed-out Gemini run,
 the wrapper force-checks both Agy Gemini quota windows. Either the 5h or 7d window at or
 below **2% remaining** is treated as depleted even when Agy has not reported an exact
 zero. It exits `10` with `QUOTA_DECISION_REQUIRED`; it never changes model automatically.

@@ -3,6 +3,19 @@
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## Unreleased
+
+- Start new Claude Code and Codex sessions in soft routing without a mandatory
+  mode question; preserve explicit choices across reconnect, resume, and end/start
+  lifecycle events, and normalize legacy pending state to soft.
+- Relax strict routing for up to three bounded operations on one small file while
+  keeping broad discovery, changes, verification, Git, research, and agents gated.
+- Transport authored Codex MCP prompts to delegate/scout/research/job/cost wrappers
+  through UTF-8 stdin, avoiding Windows Git Bash argument corruption.
+- Let `agy-review` inherit its idle deadline from the hard timeout instead of
+  killing quiet reviewers after 180 seconds, and classify exhausted Gemini 503
+  capacity separately from quota or invalid model names.
+
 ## 0.31.40 — Compact prompts and strict-mode helper exceptions
 
 - Require authored Agy task instructions to remain below 800 words on Claude and

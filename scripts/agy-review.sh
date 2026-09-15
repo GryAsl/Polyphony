@@ -20,13 +20,14 @@ MAX_BYTES="${AGY_REVIEW_MAX_BYTES:-49152}"
 CHUNK_BYTES="${AGY_REVIEW_CHUNK_BYTES:-12000}"
 PART_OUTPUT="${AGY_REVIEW_PART_OUTPUT_BYTES:-3500}"
 MAX_OUTPUT="${AGY_REVIEW_MAX_OUTPUT_CHARS:-8000}"
-REVIEW_IDLE_TIMEOUT="${AGY_REVIEW_IDLE_TIMEOUT:-180}"
+REVIEW_IDLE_TIMEOUT="${AGY_REVIEW_IDLE_TIMEOUT:-}"
 
 usage() {
   cat <<'EOF'
 Usage: agy-review [options] [goal]
   --dir <repo>          Repository (default: current directory)
   --goal <text>         Short original contract / intended change
+  --goal-stdin          Read the short original contract from UTF-8 stdin
   --worktree            Staged + unstaged tracked changes (default)
   --staged              Staged changes only
   --last                Last commit only
@@ -53,6 +54,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir)         need "$@"; DIR="$2"; shift 2 ;;
     --goal)        need "$@"; GOAL="$2"; shift 2 ;;
+    --goal-stdin)  GOAL="$(cat)"; shift ;;
     --worktree)    set_scope "worktree"; shift ;;
     --staged)      set_scope "staged"; shift ;;
     --last)        set_scope "last"; shift ;;
@@ -76,12 +78,12 @@ case "$MAX_BYTES" in ''|*[!0-9]*) die "AGY_REVIEW_MAX_BYTES must be an integer" 
 case "$CHUNK_BYTES" in ''|*[!0-9]*) die "AGY_REVIEW_CHUNK_BYTES must be an integer" ;; esac
 case "$PART_OUTPUT" in ''|*[!0-9]*) die "AGY_REVIEW_PART_OUTPUT_BYTES must be an integer" ;; esac
 case "$MAX_OUTPUT" in ''|*[!0-9]*) die "AGY_REVIEW_MAX_OUTPUT_CHARS must be an integer" ;; esac
-case "$REVIEW_IDLE_TIMEOUT" in ''|*[!0-9]*) die "AGY_REVIEW_IDLE_TIMEOUT must be an integer" ;; esac
+case "$REVIEW_IDLE_TIMEOUT" in *[!0-9]*) die "AGY_REVIEW_IDLE_TIMEOUT must be an integer" ;; esac
 [ "$MAX_BYTES" -gt 0 ] || die "AGY_REVIEW_MAX_BYTES must be greater than zero"
 [ "$CHUNK_BYTES" -gt 0 ] || die "AGY_REVIEW_CHUNK_BYTES must be greater than zero"
 [ "$PART_OUTPUT" -gt 0 ] || die "AGY_REVIEW_PART_OUTPUT_BYTES must be greater than zero"
 [ "$MAX_OUTPUT" -gt 0 ] || die "AGY_REVIEW_MAX_OUTPUT_CHARS must be greater than zero"
-[ "$REVIEW_IDLE_TIMEOUT" -gt 0 ] || die "AGY_REVIEW_IDLE_TIMEOUT must be greater than zero"
+[ -z "$REVIEW_IDLE_TIMEOUT" ] || [ "$REVIEW_IDLE_TIMEOUT" -gt 0 ] || die "AGY_REVIEW_IDLE_TIMEOUT must be greater than zero"
 [ -d "$DIR" ] || die "directory not found: $DIR"
 [ -x "$DELEGATE" ] || die "delegation wrapper is not executable: $DELEGATE"
 
@@ -157,10 +159,12 @@ run_review() { # payload file, output file, byte limit
   # Keep the reviewer in the actual repository. Running from the temporary payload
   # directory made models search the whole user profile when they ignored the
   # no-tools instruction, producing hundreds of irrelevant steps and apparent hangs.
-  # A review-specific idle ceiling also bounds the agy/ConPTY case where a final
-  # transcript is written but the CLI process fails to close.
-  (cd "$ROOT" && AGY_REVIEW_DATA_PAYLOAD=1 AGY_DELEGATE_READ_ONLY=1 "$DELEGATE" --tier "$TIER" --digest \
-    --timeout "$TIMEOUT" --idle-timeout "$REVIEW_IDLE_TIMEOUT" - <"$1" >"$2")
+  # By default the delegate derives idle protection from the hard deadline, so a
+  # quiet reviewer is not killed after three minutes. Operators can still set a
+  # review-specific ceiling explicitly with AGY_REVIEW_IDLE_TIMEOUT.
+  REVIEW_ARGS=(--tier "$TIER" --digest --timeout "$TIMEOUT")
+  [ -z "$REVIEW_IDLE_TIMEOUT" ] || REVIEW_ARGS+=(--idle-timeout "$REVIEW_IDLE_TIMEOUT")
+  (cd "$ROOT" && AGY_REVIEW_DATA_PAYLOAD=1 AGY_DELEGATE_READ_ONLY=1 "$DELEGATE" "${REVIEW_ARGS[@]}" - <"$1" >"$2")
   RC=$?
   [ "$RC" -eq 0 ] || { echo "agy-review: delegation failed (exit $RC)" >&2; return "$RC"; }
   SIZE="$(LC_ALL=C wc -c <"$2" | tr -d '[:space:]')"

@@ -190,6 +190,7 @@ On classifiable failures the wrapper prints a machine-readable line to stderr:
 | 16 | bridge/Python unavailable (`agy-delegate` on Windows), or python3 missing (`agy-migrate`) | run `agy-doctor`; install the bridge with the reported interpreter, or install python3 for migration |
 | 17 | one or more migration steps failed (`agy-migrate` only) | read the named steps; the run is still revertible with `agy-migrate --uninstall --apply` |
 | 18 | prerequisite missing (`agy-migrate` only) | no Claude Code config dir, or agy has never been run |
+| 19 | Gemini model capacity unavailable (`agy-delegate`) | agy exhausted its bounded 503 retries; retry later, or ask the user before changing models. This is not account quota and not an invalid model name. |
 
 ---
 

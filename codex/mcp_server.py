@@ -249,12 +249,18 @@ def _cwd(args: dict) -> str:
     return str(Path(value).resolve()) if value else os.getcwd()
 
 
-def _run_shell(script: str, argv: list[str], cwd: str | None = None) -> dict:
+def _run_shell(
+    script: str,
+    argv: list[str],
+    cwd: str | None = None,
+    stdin_text: str | None = None,
+) -> dict:
     script_path = str(_script(script)).replace("\\", "/")
     completed = subprocess.run(
         [_bash(), script_path, *argv],
         cwd=cwd or os.getcwd(),
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
+        input=stdin_text,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -327,17 +333,20 @@ def _dispatch(name: str, args: dict) -> dict:
     if len(instructions.split()) >= 800:
         raise ValueError("Agy instructions must be fewer than 800 words in total. Summarize to 200-500 words; do not bypass with files, stdin, or fragmented prompts.")
     if name == "delegate":
-        return _run_shell("agy-delegate.sh", _delegate_args(args), _cwd(args))
+        argv = _delegate_args(args, include_prompt=False)
+        argv.append("-")
+        return _run_shell("agy-delegate.sh", argv, _cwd(args), str(args.get("prompt") or ""))
 
     if name == "scout":
         argv = ["--dir", str(args.get("directory") or os.getcwd())]
         _flag(argv, args, "tier", "--tier")
         _flag(argv, args, "timeout", "--timeout")
-        argv.append(str(args.get("question") or ""))
-        return _run_shell("agy-scout.sh", argv, _cwd(args))
+        argv.append("-")
+        return _run_shell("agy-scout.sh", argv, _cwd(args), str(args.get("question") or ""))
 
     if name == "review":
-        argv = ["--dir", str(args.get("directory") or os.getcwd()), "--goal", str(args.get("goal") or "")]
+        goal = str(args.get("goal") or "")
+        argv = ["--dir", str(args.get("directory") or os.getcwd()), "--goal-stdin"]
         scope = args.get("scope", "worktree")
         if scope == "range":
             if not args.get("range"):
@@ -350,7 +359,7 @@ def _dispatch(name: str, args: dict) -> dict:
         _switch(argv, args, "adversarial", "--adversarial")
         _flag(argv, args, "tier", "--tier")
         _flag(argv, args, "timeout", "--timeout")
-        return _run_shell("agy-review.sh", argv, _cwd(args))
+        return _run_shell("agy-review.sh", argv, _cwd(args), goal)
 
     if name == "research":
         query = str(args.get("query") or "")
@@ -363,17 +372,20 @@ def _dispatch(name: str, args: dict) -> dict:
         delegated["prompt"] = prompt
         delegated["digest"] = True
         delegated["yolo"] = args.get("yolo", True)
-        return _run_shell("agy-delegate.sh", _delegate_args(delegated), os.getcwd())
+        argv = _delegate_args(delegated, include_prompt=False)
+        argv.append("-")
+        return _run_shell("agy-delegate.sh", argv, os.getcwd(), prompt)
 
     if name == "media":
         argv = [str(args.get("file") or "")]
         if args.get("focus"):
-            argv.append(str(args["focus"]))
+            argv.append("--focus-stdin")
         _flag(argv, args, "output", "--out")
         _switch(argv, args, "convert", "--convert")
         _flag(argv, args, "tier", "--tier")
         _flag(argv, args, "timeout", "--timeout")
-        return _run_shell("agy-media.sh", argv)
+        focus = str(args.get("focus") or "") if args.get("focus") else None
+        return _run_shell("agy-media.sh", argv, stdin_text=focus)
 
     if name == "job":
         action = str(args.get("action") or "")
@@ -381,14 +393,16 @@ def _dispatch(name: str, args: dict) -> dict:
         if action == "start":
             if not args.get("prompt"):
                 raise ValueError("job start requires prompt")
-            argv.extend(_delegate_args(args))
+            argv.extend(_delegate_args(args, include_prompt=False))
+            argv.append("-")
         elif action in {"status", "result", "cancel"}:
             if not args.get("job_id"):
                 raise ValueError(f"job {action} requires job_id")
             argv.append(str(args["job_id"]))
         elif action == "cancel_all":
             argv = ["cancel-all"]
-        return _run_shell("agy-job.sh", argv, _cwd(args))
+        stdin_text = str(args.get("prompt") or "") if action == "start" else None
+        return _run_shell("agy-job.sh", argv, _cwd(args), stdin_text)
 
     if name == "quota":
         action = str(args.get("action") or "")
@@ -449,8 +463,8 @@ def _dispatch(name: str, args: dict) -> dict:
         argv: list[str] = []
         _flag(argv, args, "tier", "--tier")
         _switch(argv, args, "yolo", "--yolo")
-        argv.append(str(args.get("prompt") or ""))
-        return _run_shell("agy-cost-compare.sh", argv)
+        argv.append("-")
+        return _run_shell("agy-cost-compare.sh", argv, stdin_text=str(args.get("prompt") or ""))
 
     raise KeyError(name)
 
