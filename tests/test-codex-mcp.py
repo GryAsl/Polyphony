@@ -65,9 +65,16 @@ class McpAdapterTests(unittest.TestCase):
     def test_packaged_timeout_policy_allows_long_codex_and_claude_calls(self):
         config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
         server = config["mcpServers"]["antigravity"]
+        # cwd stays "." so the server inherits the caller's workspace, which is the
+        # fallback --dir for delegation. The script path must NOT be relative: Claude
+        # Code resolves .mcp.json paths against the session cwd, not the plugin, so a
+        # "./..." arg makes the server fail to start in every session.
         self.assertEqual(server["cwd"], ".")
-        self.assertEqual(server["args"], ["./codex/mcp_server.py"])
-        self.assertNotIn("PLUGIN_ROOT", json.dumps(server))
+        self.assertEqual(
+            server["args"], ["${CLAUDE_PLUGIN_ROOT}/codex/mcp_server.py"]
+        )
+        for arg in server["args"]:
+            self.assertFalse(arg.startswith("./") or arg.startswith("../"), arg)
         self.assertGreaterEqual(server["tool_timeout_sec"], 2100)
 
         claude_manifest = json.loads(
