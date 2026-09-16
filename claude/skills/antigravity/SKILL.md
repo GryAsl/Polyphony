@@ -25,7 +25,11 @@ Polyphony provides two session-level routing modes:
 - **Always use Agy (strict)**: Substantive Agy-capable work (discovery, implementation/edits, diff review, tests/build/lint diagnosis, Git operations, web research, media analysis, subagents, and general terminal automation) is gated and must be delegated to Antigravity wrappers or MCP tools. Substantive turns require a completed, successful Agy work call (exit code 0, non-empty output).
 - **Use Agy when appropriate (soft)**: Non-blocking advisory reminders; native execution remains permitted.
 
-**Default & session start:** New sessions start in `Use Agy when appropriate (soft)` without asking a routing question. An explicit strict or soft choice persists across compact, reconnect, and resume events for that session; clear starts fresh in soft mode. Never repeat the question because a hook reloaded, MCP disconnected, or legacy state is missing.
+**Default & session start:** The first session for a workspace asks once for strict or soft; until
+the answer is known, substantive native work is held to the strict gate. The explicit choice is
+persisted per workspace and restored across new conversations, compact, reconnect, resume, reboot,
+and Claude/Codex app restart. Never repeat the question when a valid choice is already known or
+persisted; ask again only when no valid workspace choice exists.
 
 **Control-plane exceptions:** Mode recording/changes, quota checks/choices, job/trace/doctor/cancel management, reading bootstrap policy/config, bounded local conductor checks, and user interaction are exempt from delegation gating.
 

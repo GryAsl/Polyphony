@@ -64,9 +64,9 @@ class OpportunityHookTests(unittest.TestCase):
             "prompt": choice,
         })
 
-    # --- 1. SessionStart / Soft Default ---
+    # --- 1. SessionStart / Pending Default ---
 
-    def test_session_start_initializes_soft_without_mode_question(self):
+    def test_session_start_initializes_pending_strict_default(self):
         session = str(uuid.uuid4())
         out = self.invoke({
             "hook_event_name": "SessionStart",
@@ -75,10 +75,18 @@ class OpportunityHookTests(unittest.TestCase):
         })
         data = json.loads(out)
         ctx = data["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Soft routing is active by default", ctx)
-        self.assertIn("Do not ask a routing-mode question", ctx)
+        self.assertIn("Always use Agy (strict)", ctx)
+        self.assertIn("Use Agy when appropriate (soft)", ctx)
 
-        # Default soft is advisory rather than denying substantive native work.
+        # Confirm compact does not wipe state.
+        self.set_mode(session, "Use Agy when appropriate (soft)")
+        compact_out = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session,
+            "matcher": "compact",
+        })
+        self.assertEqual(compact_out, "")
+        # Tool call should now be in soft mode (advisory, not denied)
         tool_out = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -88,20 +96,11 @@ class OpportunityHookTests(unittest.TestCase):
         tool_data = json.loads(tool_out)
         self.assertNotIn("permissionDecision", tool_data["hookSpecificOutput"])
 
-        # Confirm compact does not wipe state.
-        compact_out = self.invoke({
-            "hook_event_name": "SessionStart",
-            "session_id": session,
-            "matcher": "compact",
-        })
-        self.assertEqual(compact_out, "")
+    # --- 2. Strict Default Before Answer & Stop Enforcement ---
 
-    # --- 2. No mandatory mode question ---
-
-    def test_missing_or_legacy_pending_state_normalizes_to_soft(self):
+    def test_strict_default_denies_substantive_tools_before_answer(self):
         session = str(uuid.uuid4())
-        state_name = hashlib.sha256(session.encode("utf-8")).hexdigest()[:24] + ".json"
-        Path(self.temp.name, state_name).write_text(json.dumps({"mode": None}), encoding="utf-8")
+        # Without answering mode, calling Read should be denied
         output = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -110,14 +109,33 @@ class OpportunityHookTests(unittest.TestCase):
         })
         data = json.loads(output)
         hook = data["hookSpecificOutput"]
-        self.assertNotIn("permissionDecision", hook)
+        self.assertEqual(hook["hookEventName"], "PreToolUse")
+        self.assertEqual(hook.get("permissionDecision"), "deny")
+        self.assertIn("Always use Agy (strict)", hook["permissionDecisionReason"])
 
-    def test_stop_never_forces_mode_question_in_default_soft(self):
+    def test_stop_enforces_exact_mode_question_when_pending(self):
         session = str(uuid.uuid4())
-        allowed = self.invoke({
+
+        # 1. Stop without presenting choices should block
+        blocked = self.invoke({
             "hook_event_name": "Stop",
             "session_id": session,
             "last_assistant_message": "I'm ready to help! What would you like to do?",
+        })
+        data = json.loads(blocked)
+        self.assertEqual(data.get("decision"), "block")
+        self.assertIn("Always use Agy (strict)", data.get("reason", ""))
+        self.assertIn("Use Agy when appropriate (soft)", data.get("reason", ""))
+
+        # 2. Stop with clearly presented canonical choices should allow
+        allowed = self.invoke({
+            "hook_event_name": "Stop",
+            "session_id": session,
+            "last_assistant_message": (
+                "Before we begin, please select an Agy routing mode:\n"
+                "- Always use Agy (strict)\n"
+                "- Use Agy when appropriate (soft)"
+            ),
         })
         self.assertEqual(allowed, "")
 
@@ -197,13 +215,20 @@ class OpportunityHookTests(unittest.TestCase):
             out = self.set_mode(session, syn)
             self.assertIn("strict", out.lower())
 
-        # A question or negation is not an explicit switch; default remains soft.
+        # A question or negation is not an answer to the initial mode choice.
         for ambiguous in ("soft?", "do not use soft"):
             pending = str(uuid.uuid4())
-            self.set_mode(pending, ambiguous)
+            ambig_ws = Path(self.temp.name, f"ambig_{pending}")
+            ambig_ws.mkdir(exist_ok=True)
+            self.invoke({
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": pending,
+                "prompt": ambiguous,
+                "cwd": str(ambig_ws),
+            })
             state_name = hashlib.sha256(pending.encode("utf-8")).hexdigest()[:24] + ".json"
             state = json.loads(Path(self.temp.name, state_name).read_text(encoding="utf-8"))
-            self.assertEqual(state.get("mode"), "soft")
+            self.assertIsNone(state.get("mode"))
 
         session = str(uuid.uuid4())
         self.set_mode(session, "Always use Agy (strict)")
@@ -492,6 +517,93 @@ class OpportunityHookTests(unittest.TestCase):
         stop_allowed4 = self.invoke({"hook_event_name": "Stop", "session_id": session4})
         self.assertEqual(stop_allowed4, "")
 
+    def test_host_background_agy_result_is_pending_until_task_output(self):
+        """An async launcher acknowledgement must not become an empty-output failure."""
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Always use Agy (strict)")
+        self.invoke({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "prompt": "Implement the requested feature",
+        })
+
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session,
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "agy-delegate --tier flash 'implement feature'",
+                "run_in_background": True,
+            },
+            "tool_response": {
+                "exit_code": 0,
+                "stdout": "",
+                "status": "completed",
+                "task_id": "task-123",
+            },
+        })
+
+        pending_stop = self.invoke({"hook_event_name": "Stop", "session_id": session})
+        pending_data = json.loads(pending_stop)
+        self.assertEqual(pending_data.get("decision"), "block")
+        self.assertIn("still running", pending_data.get("reason", ""))
+        self.assertIn("task-123", pending_data.get("reason", ""))
+        self.assertNotIn("failed (empty output)", pending_data.get("reason", ""))
+
+        # TaskOutput is a host tool rather than an Agy tool, so the hook must
+        # explicitly consume its terminal result to release the strict gate.
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session,
+            "tool_name": "TaskOutput",
+            "tool_input": {"task_id": "task-123"},
+            "tool_response": {
+                "status": "completed",
+                "task_id": "task-123",
+                "output": "Feature implemented successfully.",
+            },
+        })
+        self.assertEqual(
+            self.invoke({"hook_event_name": "Stop", "session_id": session}),
+            "",
+        )
+
+    def test_terminal_empty_task_output_remains_a_failure(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Always use Agy (strict)")
+        self.invoke({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "prompt": "Implement the requested feature",
+        })
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session,
+            "tool_name": "Bash",
+            "tool_input": {
+                "command": "agy-delegate --tier flash 'implement feature'",
+                "run_in_background": True,
+            },
+            "tool_response": {"exit_code": 0, "stdout": "", "task_id": "task-456"},
+        })
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session,
+            "tool_name": "TaskOutput",
+            "tool_input": {"task_id": "task-456"},
+            "tool_response": {
+                "status": "completed",
+                "task_id": "task-456",
+                "output": "",
+            },
+        })
+
+        stop_out = self.invoke({"hook_event_name": "Stop", "session_id": session})
+        data = json.loads(stop_out)
+        self.assertEqual(data.get("decision"), "block")
+        self.assertIn("empty output", data.get("reason", ""))
+        self.assertNotIn("still running", data.get("reason", ""))
+
     # --- 7. Claude and Codex Nested Response Shapes ---
 
     def test_claude_and_codex_nested_response_shapes(self):
@@ -678,7 +790,7 @@ class OpportunityHookTests(unittest.TestCase):
         corrupt_file = Path(self.temp.name, f"{safe_id}.json")
         corrupt_file.write_text("{corrupt: json content...", encoding="utf-8")
 
-        # Hook should recover gracefully to the safe default soft state.
+        # Hook should recover gracefully to default pending state.
         output = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -686,7 +798,7 @@ class OpportunityHookTests(unittest.TestCase):
             "tool_input": {"file_path": "src/app.py"},
         })
         data = json.loads(output)
-        self.assertNotIn("permissionDecision", data["hookSpecificOutput"])
+        self.assertEqual(data["hookSpecificOutput"].get("permissionDecision"), "deny")
 
     # --- 12. Quota Behavior Remains Intact ---
 
@@ -1126,6 +1238,154 @@ class OpportunityHookTests(unittest.TestCase):
                 data = json.loads(stop_out)
                 self.assertEqual(data.get("decision"), "block")
 
+    # --- 13. Distinct Session IDs, Restart-like State & Workspace Persistence ---
+
+    def test_distinct_session_ids_reuse_persisted_strict_mode(self):
+        session1 = str(uuid.uuid4())
+        self.set_mode(session1, "Always use Agy (strict)")
+
+        session2 = str(uuid.uuid4())
+        start_out = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session2,
+            "matcher": "startup",
+        })
+        data = json.loads(start_out)
+        ctx = data["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("select", ctx.lower())
+        self.assertIn("Strict routing is active", ctx)
+
+        tool_out = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session2,
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*.py"},
+        })
+        tool_data = json.loads(tool_out)
+        self.assertEqual(tool_data["hookSpecificOutput"].get("permissionDecision"), "deny")
+
+    def test_distinct_session_ids_reuse_persisted_soft_mode(self):
+        session1 = str(uuid.uuid4())
+        self.set_mode(session1, "Use Agy when appropriate (soft)")
+
+        session2 = str(uuid.uuid4())
+        start_out = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session2,
+            "matcher": "startup",
+        })
+        data = json.loads(start_out)
+        ctx = data["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("select", ctx.lower())
+        self.assertIn("Soft routing is active", ctx)
+
+        tool_out = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session2,
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*.py"},
+        })
+        tool_data = json.loads(tool_out)
+        self.assertNotIn("permissionDecision", tool_data["hookSpecificOutput"])
+
+    def test_restart_missing_ephemeral_state_preserves_strict_and_soft(self):
+        session_strict = str(uuid.uuid4())
+        self.set_mode(session_strict, "Always use Agy (strict)")
+
+        safe_strict = hashlib.sha256(session_strict.encode("utf-8")).hexdigest()[:24] + ".json"
+        ephemeral_strict = Path(self.temp.name, safe_strict)
+        if ephemeral_strict.exists():
+            ephemeral_strict.unlink()
+
+        resumed_strict = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session_strict,
+            "matcher": "startup",
+        })
+        self.assertNotIn("select", resumed_strict.lower())
+        denied = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session_strict,
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*.py"},
+        })
+        self.assertEqual(json.loads(denied)["hookSpecificOutput"].get("permissionDecision"), "deny")
+
+        self.set_mode(session_strict, "Use Agy when appropriate (soft)")
+        if ephemeral_strict.exists():
+            ephemeral_strict.unlink()
+
+        resumed_soft = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session_strict,
+            "matcher": "startup",
+        })
+        self.assertNotIn("select", resumed_soft.lower())
+        allowed = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session_strict,
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*.py"},
+        })
+        self.assertNotIn("permissionDecision", json.loads(allowed)["hookSpecificOutput"])
+
+    def test_unrelated_workspaces_do_not_bleed(self):
+        ws_a = Path(self.temp.name, "workspace_a")
+        ws_b = Path(self.temp.name, "workspace_b")
+        ws_a.mkdir()
+        ws_b.mkdir()
+
+        session_a = str(uuid.uuid4())
+        self.invoke({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session_a,
+            "prompt": "Always use Agy (strict)",
+            "cwd": str(ws_a),
+        })
+
+        session_b = str(uuid.uuid4())
+        start_b = self.invoke({
+            "hook_event_name": "SessionStart",
+            "session_id": session_b,
+            "matcher": "startup",
+            "cwd": str(ws_b),
+        })
+        data_b = json.loads(start_b)
+        ctx_b = data_b["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Always use Agy (strict)", ctx_b)
+        self.assertIn("Use Agy when appropriate (soft)", ctx_b)
+
+        tool_b = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session_b,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/main.py"},
+            "cwd": str(ws_b),
+        })
+        hook_b = json.loads(tool_b)["hookSpecificOutput"]
+        self.assertEqual(hook_b.get("permissionDecision"), "deny")
+        self.assertIn("selection is pending", hook_b.get("permissionDecisionReason", ""))
+
+    def test_malformed_and_stale_persisted_workspace_state_recovers_and_prompts(self):
+        ws = Path.cwd().resolve()
+        norm = os.path.normcase(str(ws))
+        ws_safe_id = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+        ws_file = Path(self.temp.name, f"ws-{ws_safe_id}.json")
+
+        for bad_content in ("{not valid json", json.dumps({"mode": "invalid_mode"})):
+            with self.subTest(bad_content=bad_content):
+                ws_file.write_text(bad_content, encoding="utf-8")
+                session = str(uuid.uuid4())
+                start_out = self.invoke({
+                    "hook_event_name": "SessionStart",
+                    "session_id": session,
+                    "matcher": "startup",
+                })
+                data = json.loads(start_out)
+                ctx = data["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("Always use Agy (strict)", ctx)
+                self.assertIn("Use Agy when appropriate (soft)", ctx)
+
 
 class HookManifestPortabilityTests(unittest.TestCase):
     @classmethod
@@ -1350,6 +1610,37 @@ class HookManifestPortabilityTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0)
             self.assertIn("THE JUDGMENT IS YOURS", completed.stdout)
+
+    def test_nudge_respects_persisted_workspace_strict_mode_without_ephemeral_file(self):
+        if not self.bash_bin:
+            self.skipTest("No compatible shell exists; skipping shell-execution assertion")
+        nudge_script = ROOT / "hooks" / "nudge-delegation.sh"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ws = Path.cwd().resolve()
+            norm = os.path.normcase(str(ws))
+            ws_id = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+            Path(temp_dir, f"ws-{ws_id}.json").write_text(
+                json.dumps({"mode": "strict"}),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["AGY_ROUTING_STATE_DIR"] = temp_dir
+            env["AGY_BRIDGE_PYTHON"] = sys.executable
+            completed = subprocess.run(
+                [self.bash_bin, str(nudge_script)],
+                env=env,
+                input=json.dumps({
+                    "session_id": "new-session-no-ephemeral-file",
+                    "prompt": "migrate across the entire codebase",
+                }),
+                text=True,
+                encoding="utf-8",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(completed.stdout.strip(), "")
 
 
 if __name__ == "__main__":

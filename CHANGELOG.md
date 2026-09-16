@@ -3,7 +3,15 @@
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
-## Unreleased
+## 0.31.50 — Background Agy completion and routing safeguards
+
+- Distinguish an asynchronous Agy launcher acknowledgement from a completed
+  delegation. Strict Stop now waits for the host `TaskOutput`/equivalent
+  terminal result instead of reporting a false `empty output` failure.
+- Preserve fail-closed handling for terminal empty output, worker errors,
+  quota, permission, timeout, and 503 capacity failures.
+- Add regression coverage for background task completion and terminal empty
+  results.
 
 - Fix the bundled MCP server never starting under Claude Code: `.mcp.json` passed
   `./codex/mcp_server.py`, which Claude Code resolves against the *session* working
@@ -26,9 +34,9 @@ All notable changes to **Polyphony**. Format loosely follows
   `.mcp.json`, any `CLAUDE_` literal in the Codex config plus the manifest pointer
   that selects it, and an unrewritten plugin-root literal surviving
   `postprocess_staged`.
-- Start new Claude Code and Codex sessions in soft routing without a mandatory
-  mode question; preserve explicit choices across reconnect, resume, and end/start
-  lifecycle events, and normalize legacy pending state to soft.
+- Ask for strict/soft routing only when no valid workspace choice is known, and
+  persist explicit choices per workspace across new sessions, app restarts, and
+  reboots without allowing unrelated workspaces to inherit the mode.
 - Relax strict routing for up to three bounded operations on one small file while
   keeping broad discovery, changes, verification, Git, research, and agents gated.
 - Transport authored Codex MCP prompts to delegate/scout/research/job/cost wrappers

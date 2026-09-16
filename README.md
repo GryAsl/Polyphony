@@ -69,7 +69,7 @@ Polyphony provides two session-level routing modes:
 - **Always use Agy (strict)**: Broad or substantive Agy-capable work (discovery, implementation, review, tests/build/lint diagnosis, Git operations, research, media analysis, native subagents, and general automation) is routed through Agy. Tiny local helpers plus up to three bounded operations on one small file remain available to the host, as do host-only connectors. A substantive delegated turn requires a completed, successful Agy result before stopping.
 - **Use Agy when appropriate (soft)**: Non-blocking advisory reminders; native execution remains permitted.
 
-Soft is the default. The mode controls how the host agent divides work between itself and
+Soft is the post-selection default. The mode controls how the host agent divides work between
 Agy/Gemini workers:
 
 - **Soft** keeps the workflow flexible. The host decides case by case whether delegation
@@ -82,7 +82,11 @@ Agy/Gemini workers:
   <img src="docs/agy-routing-modes.png" alt="Polyphony soft and strict routing mode selection" width="900">
 </p>
 
-**Default & session start:** New sessions start in soft mode without asking a routing question. An explicit strict or soft choice is preserved across compact, reconnect, and resume events for that session; clearing starts fresh in soft mode. This prevents hook reloads or missing legacy state from reopening the old mode-choice loop.
+**Default & session start:** The first session for a workspace asks once for strict or soft. Until
+the answer is known, substantive native work is held to the strict gate. The explicit choice is
+persisted per workspace and restored for new conversations, reboots, app restarts, reconnects,
+resume, and compact events, so a hook reload or a missing ephemeral session file cannot reopen the
+same question. A missing or invalid persisted choice asks again rather than guessing.
 
 **Control-plane exceptions:** Mode changes, quota checks/choices, job/trace/doctor/cancel management, bootstrap policy reading, bounded local conductor checks, and conversational user interaction are exempt from delegation gating.
 

@@ -49,9 +49,13 @@ try:
 except Exception: pass' 2>/dev/null || true)"
 [ -n "$SESSION_ID" ] || exit 0
 
-ACTIVE_MODE="$( "${PY_CMD[@]}" -c 'import hashlib,json,os,sys,tempfile
-sid = sys.argv[1]
-h = hashlib.sha256(sid.encode("utf-8","replace")).hexdigest()[:24]
+ACTIVE_MODE="$( printf '%s' "$IN" | "${PY_CMD[@]}" -c 'import hashlib,json,os,sys,tempfile
+from pathlib import Path
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+sid = str(data.get("session_id") or "")
 d = os.environ.get("AGY_ROUTING_STATE_DIR")
 if not d:
     for env_var in ("PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
@@ -60,13 +64,58 @@ if not d:
             d = os.path.join(val, "agy-routing")
             break
 if not d:
+    try:
+        home_d = os.path.join(os.path.expanduser("~"), ".claude-agy-routing")
+        if os.path.isdir(home_d) or not os.path.exists(d or ""):
+            d = home_d
+    except Exception:
+        pass
+if not d:
     d = os.path.join(tempfile.gettempdir(), "claude-agy-routing")
-p = os.path.join(d, f"{h}.json")
-try:
-    s = json.load(open(p, encoding="utf-8"))
-    print(s.get("mode") if s.get("mode") in ("strict", "soft") else "soft")
-except Exception:
-    print("soft")' "$SESSION_ID" 2>/dev/null || true )"
+
+mode = None
+if sid:
+    h = hashlib.sha256(sid.encode("utf-8","replace")).hexdigest()[:24]
+    p = os.path.join(d, f"{h}.json")
+    try:
+        s = json.load(open(p, encoding="utf-8"))
+        m = s.get("mode")
+        if m in ("strict", "soft"):
+            mode = m
+    except Exception:
+        pass
+
+if mode is None:
+    raw_cwd = (data.get("cwd") or data.get("working_directory") or
+               data.get("workingDirectory") or data.get("workspace") or
+               data.get("project_path") or data.get("projectPath"))
+    p_cwd = Path(raw_cwd).expanduser() if raw_cwd else Path.cwd()
+    try:
+        resolved = p_cwd.resolve()
+    except Exception:
+        resolved = p_cwd.absolute()
+    if resolved.is_file():
+        resolved = resolved.parent
+    cur = resolved
+    while True:
+        if (cur / ".git").exists():
+            resolved = cur
+            break
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    ws_id = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8","replace")).hexdigest()[:24]
+    ws_p = os.path.join(d, f"ws-{ws_id}.json")
+    try:
+        ws_s = json.load(open(ws_p, encoding="utf-8"))
+        m = ws_s.get("mode")
+        if m in ("strict", "soft"):
+            mode = m
+    except Exception:
+        pass
+
+print(mode if mode in ("strict", "soft") else "soft")' 2>/dev/null || true )"
 
 # When strict mode is active, strict routing is enforced by agy_opportunity_reminder.py.
 # Do not emit contradictory "THE JUDGMENT IS YOURS" context; defer to the active mode.

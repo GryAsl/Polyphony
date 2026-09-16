@@ -20,6 +20,7 @@ import re
 import shlex
 import sys
 import tempfile
+import time
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -64,6 +65,59 @@ REJECTED_RESPONSE_STATUSES = {
     "timedout",
     "cancelled",
     "canceled",
+}
+
+# Claude Code can return a successful launcher response for a background Bash
+# task before the Agy worker has produced any output.  These markers are the
+# only signals we treat as "still in flight"; an unmarked empty response stays
+# a real failure so quota/permission/worker errors remain fail-closed.
+PENDING_RESPONSE_STATUSES = {
+    "queued",
+    "starting",
+    "started",
+    "running",
+    "pending",
+    "in_progress",
+    "in-progress",
+    "async",
+    "asynchronous",
+}
+TERMINAL_RESPONSE_STATUSES = {
+    "complete",
+    "completed",
+    "done",
+    "success",
+    "succeeded",
+    "failed",
+    "error",
+    "cancelled",
+    "canceled",
+    "timeout",
+    "timed_out",
+    "timed-out",
+}
+ASYNC_FLAG_KEYS = {
+    "run_in_background",
+    "runInBackground",
+    "background",
+    "backgrounded",
+    "async",
+    "asynchronous",
+}
+ASYNC_STATUS_KEYS = {"status", "state", "phase"}
+ASYNC_TASK_ID_KEYS = {
+    "task_id",
+    "taskId",
+    "background_task_id",
+    "backgroundTaskId",
+    "job_id",
+    "jobId",
+}
+BACKGROUND_RESULT_TOOLS = {
+    "taskoutput",
+    "backgroundtaskoutput",
+    "backgroundresult",
+    "taskresult",
 }
 
 MEDIA_EXTENSIONS = {
@@ -160,10 +214,27 @@ DENIAL_INSTRUCTIONS = {
     "terminal": "Strict mode: general terminal automation must use `agy-delegate` (or Codex `mcp__antigravity__delegate`). Native shell execution is denied.",
 }
 
+PENDING_DENIAL_INSTRUCTION = (
+    "Agy routing mode selection is pending. Substantive work is denied until the user chooses:\n"
+    "- Always use Agy (strict)\n"
+    "- Use Agy when appropriate (soft)\n"
+    "Ask the user to select a mode first."
+)
+
 SESSION_START_CONTEXT = (
-    "[Agy routing] Soft routing is active by default. Do not ask a routing-mode question. "
-    "Use Agy when it is useful and keep native execution available. Switch to strict only after "
-    "an explicit user request; an explicit soft/strict choice remains valid when the session resumes."
+    "[Agy routing] Routing mode is unanswered. Strict routing is effective: all substantive work must be routed to Agy.\n"
+    "At the first user-facing turn, ask the user exactly one concise question with these visible choices:\n"
+    "- Always use Agy (strict)\n"
+    "- Use Agy when appropriate (soft)\n"
+    "Keep the user's substantive request in mind and resume it immediately after the choice."
+)
+
+PENDING_PROMPT_CONTEXT = (
+    "[Agy routing] Routing mode is unanswered. Strict routing is effective: all substantive work must be routed to Agy.\n"
+    "Before performing substantive work, ask the user to select a routing mode:\n"
+    "- Always use Agy (strict)\n"
+    "- Use Agy when appropriate (soft)\n"
+    "Keep the user's substantive request in mind and resume it immediately after the choice."
 )
 
 
@@ -215,9 +286,14 @@ def _state_dir() -> Path:
                 return p
             except Exception:
                 pass
-    p = Path(tempfile.gettempdir()) / "claude-agy-routing"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    try:
+        p = Path.home() / ".claude-agy-routing"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    except Exception:
+        p = Path(tempfile.gettempdir()) / "claude-agy-routing"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
 
 def _session_state_path(session_id: str) -> Path:
@@ -225,9 +301,76 @@ def _session_state_path(session_id: str) -> Path:
     return _state_dir() / f"{safe_id}.json"
 
 
+def _resolve_workspace_root(data: dict | None = None) -> Path:
+    raw = None
+    if isinstance(data, dict):
+        raw = (
+            data.get("cwd")
+            or data.get("working_directory")
+            or data.get("workingDirectory")
+            or data.get("workspace")
+            or data.get("project_path")
+            or data.get("projectPath")
+        )
+    p = Path(raw).expanduser() if raw else Path.cwd()
+    try:
+        resolved = p.resolve()
+    except Exception:
+        resolved = p.absolute()
+    if resolved.is_file():
+        resolved = resolved.parent
+    cur = resolved
+    while True:
+        if (cur / ".git").exists():
+            return cur
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return resolved
+
+
+def _workspace_state_path(data: dict | None = None) -> Path:
+    ws = _resolve_workspace_root(data)
+    norm = os.path.normcase(str(ws))
+    safe_id = hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:24]
+    return _state_dir() / f"ws-{safe_id}.json"
+
+
+def _read_persisted_workspace_mode(data: dict | None = None) -> str | None:
+    path = _workspace_state_path(data)
+    try:
+        if path.exists():
+            content = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(content, dict):
+                mode = content.get("mode")
+                if mode in {"strict", "soft"}:
+                    return mode
+    except Exception:
+        pass
+    return None
+
+
+def _write_persisted_workspace_mode(mode: str, data: dict | None = None) -> None:
+    if mode not in {"strict", "soft"}:
+        return
+    path = _workspace_state_path(data)
+    try:
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        payload = {
+            "mode": mode,
+            "workspace": str(_resolve_workspace_root(data)),
+            "updated_at": time.time(),
+        }
+        temporary.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(temporary, path)
+    except Exception:
+        pass
+
+
 def _default_state() -> dict:
     return {
-        "mode": "soft",
+        "mode": None,
         "question_presented": False,
         "turn_id": "",
         "is_substantive": False,
@@ -237,6 +380,8 @@ def _default_state() -> dict:
         "agy_attempted": False,
         "agy_success": False,
         "agy_failed": False,
+        "agy_pending": False,
+        "agy_task_id": "",
         "last_agy_error": "",
         "denied_categories": [],
         "warned_categories": [],
@@ -245,7 +390,7 @@ def _default_state() -> dict:
     }
 
 
-def _read_state(session_id: str) -> dict:
+def _read_state(session_id: str, data: dict | None = None) -> dict:
     path = _session_state_path(session_id)
     state = _default_state()
     try:
@@ -257,11 +402,17 @@ def _read_state(session_id: str) -> dict:
                         state[k] = v
     except Exception:
         pass
-    # Old/corrupt state files used mode=null to mean a mandatory strict-default
-    # question. Treat them as soft so an update, cache reset or partial write can
-    # never resurrect the repeated-question gate.
-    if state.get("mode") not in {"strict", "soft"}:
-        state["mode"] = "soft"
+
+    session_mode = state.get("mode")
+    if session_mode in {"strict", "soft"}:
+        return state
+
+    persisted_mode = _read_persisted_workspace_mode(data)
+    if persisted_mode in {"strict", "soft"}:
+        state["mode"] = persisted_mode
+        state["question_presented"] = True
+    else:
+        state["mode"] = None
     return state
 
 
@@ -1086,6 +1237,103 @@ def _check_error_flag(obj: dict) -> str | None:
     return None
 
 
+def _response_dict(response: any) -> dict | None:
+    if isinstance(response, dict):
+        return response
+    if isinstance(response, str):
+        stripped = response.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = json.loads(stripped)
+            except Exception:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _nested_response_dicts(value: any):
+    """Yield a response and the host's common task/result envelopes."""
+    if not isinstance(value, dict):
+        return
+    yield value
+    for key in ("result", "job", "task", "background_task", "backgroundTask", "structuredContent", "structured_content"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            yield from _nested_response_dicts(nested)
+
+
+def _normalize_async_status(value: any) -> str:
+    return str(value).strip().lower().replace(" ", "_") if value is not None else ""
+
+
+def _is_truthy_flag(value: any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return False
+
+
+def _background_task_id(*values: any) -> str:
+    for value in values:
+        for obj in _nested_response_dicts(value) or ():
+            for key in ASYNC_TASK_ID_KEYS:
+                task_id = obj.get(key)
+                if task_id is not None and str(task_id).strip():
+                    return str(task_id).strip()
+    return ""
+
+
+def _background_result_is_pending(data: dict, tool_input: dict, response: any) -> bool:
+    """Return true only for explicit host signals that work is still running.
+
+    A blank stdout by itself is deliberately not enough.  The wrapper uses an
+    empty final response to signal a real failure, so guessing that every blank
+    result is asynchronous would weaken strict routing and hide failures.
+    """
+    response_obj = _response_dict(response)
+    # `run_in_background` belongs to the launcher invocation. Its shell
+    # command can legitimately report exit 0/completed while the spawned Agy
+    # worker is still running, so this signal takes precedence over that
+    # generic command status. The later TaskOutput call does not carry this
+    # launcher flag and is evaluated normally below.
+    if isinstance(tool_input, dict) and any(
+        _is_truthy_flag(tool_input.get(key)) for key in ASYNC_FLAG_KEYS
+    ):
+        return True
+
+    sources = (data, response_obj)
+    statuses: set[str] = set()
+    has_async_flag = False
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        statuses.update({
+            _normalize_async_status(source.get(key))
+            for key in ASYNC_STATUS_KEYS
+            if source.get(key) is not None
+        })
+        has_async_flag = has_async_flag or any(
+            _is_truthy_flag(source.get(key)) for key in ASYNC_FLAG_KEYS
+        )
+
+    if statuses & PENDING_RESPONSE_STATUSES:
+        return True
+
+    # A background flag in the tool input/response is a definitive signal
+    # that the visible result is only the launcher acknowledgement. A terminal
+    # status overrides it because the final TaskOutput may retain the original
+    # flag in its envelope.
+    return has_async_flag and not statuses & TERMINAL_RESPONSE_STATUSES
+
+
+def _is_background_result_tool(tool_name: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]", "", tool_name.lower())
+    return normalized in BACKGROUND_RESULT_TOOLS
+
+
 def is_agy_response_successful(response: any) -> tuple[bool, str]:
     if response is None:
         return False, "missing response"
@@ -1472,14 +1720,14 @@ def handle_session_start(data: dict, session_id: str) -> None:
     if "compact" in {matcher, source, trigger} or compact_flag:
         return
 
-    # Preserve an explicit per-session choice across resume/plugin reconnects.
-    # A missing or legacy pending state is normalized to soft by _read_state.
-    # Clear intentionally starts fresh, which now also means soft and requires
-    # no question. Repeated SessionStart events therefore cannot reset strict or
-    # resurrect the old mandatory-choice loop.
-    state = _read_state(session_id)
+    state = _read_state(session_id, data=data)
     if "clear" in {matcher, source, trigger}:
+        current_mode = state.get("mode")
         state = _default_state()
+        state["mode"] = current_mode
+        if current_mode in {"strict", "soft"}:
+            state["question_presented"] = True
+
     state["turn_id"] = ""
     state["is_substantive"] = False
     state["native_helper_used"] = False
@@ -1488,24 +1736,46 @@ def handle_session_start(data: dict, session_id: str) -> None:
     state["agy_attempted"] = False
     state["agy_success"] = False
     state["agy_failed"] = False
+    state["agy_pending"] = False
+    state["agy_task_id"] = ""
     state["last_agy_error"] = ""
     state["denied_categories"] = []
     state["warned_categories"] = []
     state["continuation_count"] = 0
     state["user_mode_selection"] = False
-    _write_state(session_id, state)
+
     update_context = _polyphony_update_context()
-    context = f"{SESSION_START_CONTEXT}\n\n{update_context}" if update_context else SESSION_START_CONTEXT
-    _emit_context("SessionStart", context)
+
+    if state.get("mode") in {"strict", "soft"}:
+        _write_state(session_id, state)
+        active_mode = state["mode"]
+        if active_mode == "strict":
+            mode_context = (
+                "[Agy routing] Strict routing is active. Substantive work must be delegated to Antigravity; "
+                "bounded single-file checks, tiny corrections, local orchestration, and host-only capabilities remain available natively."
+            )
+        else:
+            mode_context = (
+                "[Agy routing] Soft routing is active. Substantive work may be completed natively or delegated. "
+                "Delegation reminders are advisory."
+            )
+        context = f"{mode_context}\n\n{update_context}" if update_context else mode_context
+        _emit_context("SessionStart", context)
+    else:
+        state["mode"] = None
+        state["question_presented"] = True
+        _write_state(session_id, state)
+        context = f"{SESSION_START_CONTEXT}\n\n{update_context}" if update_context else SESSION_START_CONTEXT
+        _emit_context("SessionStart", context)
 
 
-def handle_session_end(session_id: str) -> None:
-    # Keep only the session-level mode so reopening/resuming the same session
-    # cannot ask again or silently lose an explicit strict choice.
-    state = _read_state(session_id)
-    preserved = _default_state()
-    preserved["mode"] = state.get("mode") if state.get("mode") in {"strict", "soft"} else "soft"
-    _write_state(session_id, preserved)
+def handle_session_end(session_id: str, data: dict | None = None) -> None:
+    state = _read_state(session_id, data=data)
+    mode = state.get("mode")
+    if mode in {"strict", "soft"}:
+        preserved = _default_state()
+        preserved["mode"] = mode
+        _write_state(session_id, preserved)
 
 
 def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id: str) -> None:
@@ -1519,6 +1789,8 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
     state["agy_attempted"] = False
     state["agy_success"] = False
     state["agy_failed"] = False
+    state["agy_pending"] = False
+    state["agy_task_id"] = ""
     state["last_agy_error"] = ""
     state["denied_categories"] = []
     state["warned_categories"] = []
@@ -1526,32 +1798,31 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
     state["user_mode_selection"] = False
 
     current_mode = state.get("mode")
-    if current_mode not in {"strict", "soft"}:
-        current_mode = "soft"
-        state["mode"] = current_mode
     context_to_emit = ""
 
-    # Canonical labels remain valid explicit commands even though the plugin no
-    # longer asks a mandatory first-turn question.
     mode_target, is_sole = parse_mode_selection_intent(prompt)
-    if mode_target == "strict":
-        state["mode"] = "strict"
+    if mode_target in {"strict", "soft"}:
+        state["mode"] = mode_target
         state["user_mode_selection"] = is_sole
         state["is_substantive"] = not is_sole
-        context_to_emit = (
-            "[Agy routing] Switched Agy routing mode to strict. "
-            "Substantive Agy-capable work must be delegated; bounded single-file checks, tiny corrections, local orchestration, and host-only capabilities remain available natively."
-        )
-    elif mode_target == "soft":
-        state["mode"] = "soft"
-        state["user_mode_selection"] = is_sole
-        state["is_substantive"] = not is_sole
-        context_to_emit = (
-            "[Agy routing] Switched Agy routing mode to soft. "
-            "Substantive work may be completed natively or delegated. Delegation reminders are advisory."
-        )
+        _write_persisted_workspace_mode(mode_target, data)
+        if mode_target == "strict":
+            context_to_emit = (
+                "[Agy routing] Switched Agy routing mode to strict. "
+                "Substantive Agy-capable work must be delegated; bounded single-file checks, tiny corrections, local orchestration, and host-only capabilities remain available natively."
+            )
+        else:
+            context_to_emit = (
+                "[Agy routing] Switched Agy routing mode to soft. "
+                "Substantive work may be completed natively or delegated. Delegation reminders are advisory."
+            )
     else:
-        if state["mode"] == "strict" and not _is_control_plane_prompt(prompt):
+        if current_mode is None:
+            if state.get("question_presented"):
+                context_to_emit = ""
+            else:
+                context_to_emit = PENDING_PROMPT_CONTEXT
+        elif state["mode"] == "strict" and not _is_control_plane_prompt(prompt):
             state["is_substantive"] = True
 
     _write_state(session_id, state)
@@ -1599,7 +1870,7 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
         return
 
     mode = state.get("mode")
-    effective_strict = mode == "strict"
+    effective_strict = (mode is None or mode == "strict")
     quota_context = _quota_context()
 
     if category == "external":
@@ -1640,9 +1911,13 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
         state["denied_categories"] = sorted(denied)
         _write_state(session_id, state)
 
-        instruction = DENIAL_INSTRUCTIONS.get(
-            category,
-            "Strict mode: this substantive operation must be routed through an Agy worker. Native execution is denied.",
+        instruction = (
+            PENDING_DENIAL_INSTRUCTION
+            if mode is None
+            else DENIAL_INSTRUCTIONS.get(
+                category,
+                "Strict mode: this substantive operation must be routed through an Agy worker. Native execution is denied.",
+            )
         )
         if quota_context:
             instruction = f"{instruction}\n\n{quota_context}"
@@ -1696,17 +1971,49 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
             state["agy_attempted"] = False
             state["agy_success"] = False
             state["agy_failed"] = False
+            state["agy_pending"] = False
+            state["agy_task_id"] = ""
             state["last_agy_error"] = ""
             state["denied_categories"] = []
             state["warned_categories"] = []
             state["continuation_count"] = 0
             _write_state(session_id, state)
+            _write_persisted_workspace_mode(selected_mode, data)
             label = "Always use Agy (strict)" if selected_mode == "strict" else "Use Agy when appropriate (soft)"
             _emit_context(
                 "PostToolUse",
                 f"[Agy routing] Recorded your selection: {label}. Continue the original request using this mode.",
             )
             return
+
+    response = data.get("tool_response") if data.get("tool_response") is not None else data.get("toolResponse", data.get("result", data.get("response")))
+
+    # Claude's TaskOutput (and equivalent host tools) are not themselves Agy
+    # calls, but they complete a previously recorded background delegation.
+    # Consume their terminal result so a successful worker can release the
+    # strict Stop gate and a terminal empty/error result remains a failure.
+    if state.get("agy_pending") and _is_background_result_tool(tool_name):
+        if event == "PostToolUseFailure":
+            state["agy_pending"] = False
+            state["agy_failed"] = True
+            state["agy_success"] = False
+            state["last_agy_error"] = str(data.get("error") or "background result collection failed")
+        elif _background_result_is_pending(data, tool_input, response):
+            state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
+        else:
+            success, err = is_agy_response_successful(response)
+            state["agy_pending"] = False
+            state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
+            if success:
+                state["agy_success"] = True
+                state["agy_failed"] = False
+                state["last_agy_error"] = ""
+            else:
+                state["agy_success"] = False
+                state["agy_failed"] = True
+                state["last_agy_error"] = err
+        _write_state(session_id, state)
+        return
 
     if not is_work_producing_agy_call(tool_name, tool_input):
         return
@@ -1715,20 +2022,29 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
     state["is_substantive"] = True
 
     if event == "PostToolUseFailure":
+        state["agy_pending"] = False
         state["agy_failed"] = True
         state["agy_success"] = False
         state["last_agy_error"] = str(data.get("error") or "tool execution failed")
     else:
-        response = data.get("tool_response") if data.get("tool_response") is not None else data.get("toolResponse", data.get("result", data.get("response")))
-        success, err = is_agy_response_successful(response)
-        if success:
-            state["agy_success"] = True
+        if _background_result_is_pending(data, tool_input, response):
+            state["agy_pending"] = True
+            state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
+            state["agy_success"] = False
             state["agy_failed"] = False
             state["last_agy_error"] = ""
         else:
-            state["agy_success"] = False
-            state["agy_failed"] = True
-            state["last_agy_error"] = err
+            success, err = is_agy_response_successful(response)
+            state["agy_pending"] = False
+            state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
+            if success:
+                state["agy_success"] = True
+                state["agy_failed"] = False
+                state["last_agy_error"] = ""
+            else:
+                state["agy_success"] = False
+                state["agy_failed"] = True
+                state["last_agy_error"] = err
 
     _write_state(session_id, state)
 
@@ -1737,14 +2053,24 @@ def handle_stop(data: dict, state: dict, session_id: str) -> None:
     stop_active = bool(data.get("stop_hook_active") or data.get("stopHookActive"))
     continuation_count = state.get("continuation_count", 0)
 
-    if stop_active or continuation_count >= 3:
+    if stop_active:
         return
 
     mode = state.get("mode")
 
-    if mode not in {"strict", "soft"}:
-        state["mode"] = "soft"
+    if mode is None:
+        last_message = _extract_last_message(data)
+        if _presents_mode_choices(last_message):
+            state["question_presented"] = True
+            _write_state(session_id, state)
+            return
+        state["continuation_count"] = continuation_count + 1
         _write_state(session_id, state)
+        _emit_stop_block(
+            "You must ask the user to select the Agy routing mode before stopping. Clearly present both visible choices:\n"
+            "- Always use Agy (strict)\n"
+            "- Use Agy when appropriate (soft)"
+        )
         return
 
     if mode == "soft":
@@ -1757,6 +2083,27 @@ def handle_stop(data: dict, state: dict, session_id: str) -> None:
         return
 
     if state.get("agy_success"):
+        return
+
+    # An asynchronous launcher acknowledgement is not a failure and must not
+    # be mistaken for a completed delegation. Keep the turn open until the
+    # host collects a terminal TaskOutput/background result. This check is
+    # intentionally before the generic continuation cap: allowing a stop here
+    # would reintroduce the false-positive race this state represents.
+    if state.get("agy_pending"):
+        state["continuation_count"] = continuation_count + 1
+        _write_state(session_id, state)
+        task_id = state.get("agy_task_id")
+        task_hint = f" (task id: {task_id})" if task_id else ""
+        _emit_stop_block(
+            "An Agy background worker is still running and has not produced a final result"
+            f"{task_hint}. Do not end the turn or report an empty-output failure yet; "
+            "collect/wait for the host background task with TaskOutput (or the equivalent "
+            "job result operation), then continue once its terminal result is available."
+        )
+        return
+
+    if continuation_count >= 3:
         return
 
     if state.get("agy_failed"):
@@ -1786,10 +2133,10 @@ def main():
         return
 
     if event == "SessionEnd":
-        handle_session_end(session_id)
+        handle_session_end(session_id, data=data)
         return
 
-    state = _read_state(session_id)
+    state = _read_state(session_id, data=data)
 
     if turn_id and turn_id != state.get("turn_id"):
         state["turn_id"] = turn_id
@@ -1800,6 +2147,8 @@ def main():
         state["agy_attempted"] = False
         state["agy_success"] = False
         state["agy_failed"] = False
+        state["agy_pending"] = False
+        state["agy_task_id"] = ""
         state["last_agy_error"] = ""
         state["denied_categories"] = []
         state["warned_categories"] = []
