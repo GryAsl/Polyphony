@@ -64,29 +64,20 @@ Start a new Codex task after installation. The plugin provides direct MCP tools 
 
 ## Routing modes
 
-Polyphony provides two session-level routing modes:
+Polyphony has two session-level modes:
 
-- **Always use Agy (strict)**: Broad or substantive Agy-capable work (discovery, implementation, review, tests/build/lint diagnosis, Git operations, research, media analysis, native subagents, and general automation) is routed through Agy. Tiny local helpers plus up to three bounded operations on one small file remain available to the host, as do host-only connectors. A substantive delegated turn requires a completed, successful Agy result before stopping.
-- **Use Agy when appropriate (soft)**: Non-blocking advisory reminders; native execution remains permitted.
-
-Soft is the post-selection default. The mode controls how the host agent divides work between
-Agy/Gemini workers:
-
-- **Soft** keeps the workflow flexible. The host decides case by case whether delegation
-  is worthwhile, so small or simple requests can stay with the host agent.
-- **Strict** delegates substantive work—including exploration, edits, review, tests, and
-  Git operations—to Agy/Gemini workers. The host agent mainly orchestrates the workers
-  and reports the result.
+- **Strict:** Substantive Agy-capable work is delegated to Agy/Gemini; tiny local helpers,
+  bounded small-file operations, and host-only tools remain available. A strict turn needs a
+  completed successful Agy result before it can stop.
+- **Soft:** Delegation reminders are advisory and native execution remains allowed.
 
 <p align="center">
   <img src="docs/agy-routing-modes.png" alt="Polyphony soft and strict routing mode selection" width="900">
 </p>
 
-**Default & session start:** The first session for a workspace asks once for strict or soft. Until
-the answer is known, substantive native work is held to the strict gate. The explicit choice is
-persisted per workspace and restored for new conversations, reboots, app restarts, reconnects,
-resume, and compact events, so a hook reload or a missing ephemeral session file cannot reopen the
-same question. A missing or invalid persisted choice asks again rather than guessing.
+**Session start:** The workspace choice is asked once, persisted across new conversations,
+reboots, app restarts, reconnects, resume, and compact events, and restored without repeating the
+question. Until a valid choice exists, substantive work stays behind the strict gate.
 
 **Control-plane exceptions:** Mode changes, quota checks/choices, job/trace/doctor/cancel management, bootstrap policy reading, bounded local conductor checks, and conversational user interaction are exempt from delegation gating.
 
@@ -116,7 +107,8 @@ Claude Code examples:
 /antigravity:quota
 ```
 
-Codex uses the corresponding `antigravity` MCP tools directly. The MCP adapter calls the same wrappers and returns their stdout, stderr, and exact exit code.
+Codex uses the corresponding `antigravity` MCP tools; both hosts call the same wrappers and
+preserve stdout, stderr, and exact exit codes.
 
 The wrappers are also available from Git Bash:
 
@@ -128,66 +120,37 @@ agy-job start --tier flash --dir "C:\path\to\repo" "Complete this long-running t
 agy-quota --force
 ```
 
-Routine calls default to 30 minutes. The Codex MCP transport allows 35 minutes so a healthy long-running worker can return before the transport closes. Use `--timeout` when a task needs a different wrapper deadline.
-
-For substantial work, keep that generous budget: use `--timeout 45m` or `--timeout 60m`
-for broad multi-file, Unity, or build-heavy tasks. Short timeouts are intended only for
-health probes; the Windows idle timeout is normally derived from the hard deadline.
-
-Keep authored task instructions at 200–500 words and always below 800 words. At 800,
-Polyphony requires summarization, including for stdin and task files assembled in pieces.
-Reference source paths instead of pasting code. Automatically supplied review diffs have
-a separate data-size limit; inline transport also retains its 24,000-byte ceiling.
+Routine calls default to 30 minutes; use `--timeout 45m` or `--timeout 60m` for broad,
+build-heavy work. Keep authored prompts at 200–500 words and always below 800; use source paths
+instead of pasting code. The Windows idle timeout normally follows the hard deadline.
 
 **Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. Host-only tools without equivalent Agy access remain advisory. Substantive discovery, implementation, review, tests and Git mutations still require Agy; a short command or the word `python` alone does not make substantive work exempt.
 
 ## Gemini quota control
 
-The plugin reads Agy's zero-token `/usage` response and tracks both the Gemini **5h** and
-**7d** windows. A failed, empty, or timed-out Gemini call triggers an immediate check.
-If either window has **2% or less remaining**, the wrapper enters depleted mode and does
-not switch models automatically.
+Polyphony tracks both Gemini quota windows (**5h** and **7d**). After a failed, empty, or timed-out
+call, it checks them immediately; if either is at **2% or less**, it pauses without switching
+models automatically.
 
 <p align="center">
   <img src="docs/gemini-quota-control.png" alt="Polyphony Gemini quota depleted decision dialog" width="760">
 </p>
 
-Claude or Codex must ask the user to choose one of these paths:
-
-1. Kill active Agy workers that are no longer progressing and continue the interrupted
-   task with exact model `claude-sonnet-4-6`.
-2. Keep the workers alive, wait for quota reset, and check both windows every 10 minutes.
-
-Record the choice with `/antigravity:quota sonnet|wait`, `agy-quota --decision
-sonnet|wait`, or the Codex `quota` MCP tool. `agy-job cancel-all` covers plugin-managed
-jobs; the host must cancel any stalled tool tasks it started. Waiting resumes Gemini only
-after both windows are above 2%.
-
-For a user-approved Sonnet 4.6 fallback, Polyphony requires the worker to execute the task
-directly without spawning another agent. A non-empty response and exit code 0 are not
-enough: the wrapper also requires a machine-readable completion status and concise concrete
-evidence, preventing a delegation promise from being mistaken for completed work.
-
-The tracker emits a one-time notice when either window crosses 75%, 50%, 25%, or 10%
-remaining. A threshold is not announced again until that quota window resets above it.
+The user chooses either to stop stalled workers and continue with direct Sonnet 4.6, or keep
+workers alive and wait while both windows are checked every 10 minutes. No fallback occurs
+without that choice; waiting resumes Gemini only above 2%. Sonnet fallback also requires a direct
+completion receipt and concrete evidence. One-time notices appear at 75%, 50%, 25%, and 10%.
 
 ## Polyphony update checks
 
-While Polyphony is in use, its `SessionStart`/`UserPromptSubmit` hooks perform a best-effort
-GitHub release check at most once per day by default. The check is read-only: it never
-updates itself and never runs an install command without the user's explicit approval.
-When a newer release is found, the host agent asks whether to update and shows the exact
-host-specific commands. Claude Code uses `claude plugin update antigravity@polyphony -y` followed
-by a reload/restart (or `/plugin marketplace update polyphony` then `/reload-plugins` inside its
-UI); Codex uses `codex plugin marketplace upgrade polyphony` followed by
-`codex plugin add antigravity@polyphony`. After updating, verify the installed version and
-reload/start a new Claude session or start a new Codex task so the new plugin is loaded.
+While Polyphony is active, its hooks automatically perform a read-only GitHub latest-release check
+once per day by default. If a newer version exists, the host asks for explicit approval and then
+shows the Claude- or Codex-specific update command; it never installs silently. After approval,
+verify the version and reload Claude/start a new Codex task so the new plugin is loaded.
 
-The interval can be changed with `POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS`; the network
-timeout defaults to four seconds and can be changed with
-`POLYPHONY_UPDATE_CHECK_TIMEOUT_SECONDS`. A failed check is silent and retried at the next
-interval. The manual `/antigravity:update` command follows the same approval rule.
-Set `POLYPHONY_UPDATE_CHECK=off` to disable these automatic checks.
+The interval and network timeout are configurable with `POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS`
+and `POLYPHONY_UPDATE_CHECK_TIMEOUT_SECONDS`; set `POLYPHONY_UPDATE_CHECK=off` to disable checks.
+The manual `/antigravity:update` command follows the same approval rule.
 
 ## Permissions and troubleshooting
 
