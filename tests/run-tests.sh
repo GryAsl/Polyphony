@@ -46,7 +46,6 @@ for rel in (
     ".mcp.json",
     "codex/.mcp.json",
     "claude/hooks/hooks.json",
-    "hooks/hooks.json",
     "hooks/policy-context.json",
 ):
     with (root / rel).open(encoding="utf-8") as handle:

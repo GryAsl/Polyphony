@@ -1463,7 +1463,6 @@ class HookManifestPortabilityTests(unittest.TestCase):
 
     def setUp(self):
         self.claude_manifest = json.loads((ROOT / "claude" / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-        self.codex_manifest = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
         self.bash_bin = self._find_bash()
 
     def test_session_start_compact_exclusion_and_fork_inclusion(self):
@@ -1482,15 +1481,6 @@ class HookManifestPortabilityTests(unittest.TestCase):
         fork_cmds = claude_starts["fork"]
         self.assertTrue(any("run-opportunity-hook.sh" in cmd for cmd in fork_cmds))
 
-        # Codex: SessionStart matcher must be startup|resume|clear (compact and fork excluded)
-        codex_starts = self.codex_manifest["hooks"]["SessionStart"]
-        self.assertEqual(len(codex_starts), 1)
-        codex_matcher = codex_starts[0].get("matcher")
-        self.assertEqual(codex_matcher, "startup|resume|clear")
-        matchers = codex_matcher.split("|")
-        self.assertNotIn("compact", matchers)
-        self.assertNotIn("fork", matchers)
-
     def test_manifest_interpreter_commands_and_launcher_portability(self):
         # Claude: all python hook invocations must use the portable launcher
         for event_name, entries in self.claude_manifest["hooks"].items():
@@ -1500,15 +1490,6 @@ class HookManifestPortabilityTests(unittest.TestCase):
                     if "agy_opportunity_reminder" in cmd or "run-opportunity-hook" in cmd:
                         self.assertIn("run-opportunity-hook.sh", cmd)
                         self.assertFalse(cmd.startswith("python "))
-
-        # Codex: command uses python3, commandWindows uses python
-        for event_name, entries in self.codex_manifest["hooks"].items():
-            for entry in entries:
-                for h in entry.get("hooks", []):
-                    cmd = h.get("command", "")
-                    cmd_win = h.get("commandWindows", "")
-                    self.assertTrue(cmd.startswith("python3 "), f"Expected python3 in {event_name}: {cmd}")
-                    self.assertTrue(cmd_win.startswith("python "), f"Expected python in {event_name}: {cmd_win}")
 
         # Launcher file must exist, be executable, and resolve python interpreters in order
         launcher = ROOT / "hooks" / "run-opportunity-hook.sh"

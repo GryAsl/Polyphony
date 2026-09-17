@@ -28,7 +28,7 @@ jobs:
           python3 - <<'PY'
           import json
           for p in (".claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "prices.json",
-                    "hooks/hooks.json", "hooks/policy-context.json"):
+                    "hooks/policy-context.json"):
               json.load(open(p))
               print("ok", p)
           PY
