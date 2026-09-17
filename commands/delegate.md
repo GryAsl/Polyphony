@@ -48,6 +48,13 @@ Do this:
 Small tasks are explicitly eligible. Do not refuse solely because a task is below the
 cost break-even; use one precise synchronous Flash delegation and avoid needless fan-out.
 
+For repeated work from the same main agent, prefer the Polyphony MCP tool
+`persistent_delegate` when available. Give it one stable `parent_agent_id` for the
+current main agent and reuse only the returned `agent_id`; Polyphony will reject a
+different parent or workspace. It serializes one task per subagent, renews the lease,
+and rotates to a fresh conversation only when an explicit resume failure is detected.
+Use the ordinary `delegate` tool for isolated work or when context reuse is undesirable.
+
 If a Gemini run fails, the wrapper checks both 5h and 7d quota windows. Either window at
 or below 2% is depleted and returns exit 10. Ask the user whether to kill stalled workers
 and continue with Claude Sonnet 4.6, or keep them alive and check both windows every 10

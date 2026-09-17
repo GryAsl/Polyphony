@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,17 @@ class OpportunityHookTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_persistent_runtime_mcp_tools_obey_strict_gate(self):
+        spec = importlib.util.spec_from_file_location("polyphony_opportunity_hook", HOOK)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader
+        spec.loader.exec_module(module)
+        self.assertTrue(module.is_work_producing_agy_call("mcp__antigravity__persistent_delegate", {}))
+        self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__agent_task", {}))
+        self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__agent_message", {}))
+        self.assertTrue(module.is_control_plane_exempt("bash", {"command": "polyphony-agent agents"}))
 
     def invoke(self, payload: dict) -> str:
         completed = subprocess.run(

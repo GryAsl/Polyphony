@@ -3,6 +3,39 @@
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## 0.31.60 — Persistent Subagent Communication & Reliability
+
+### Persistent subagent communication
+
+- Add a SQLite-backed agent, task, lease, and message registry shared by Claude and Codex.
+  A parent agent can reuse its own persistent subagent conversation while unrelated agents
+  and workspaces remain isolated.
+- Add one-active-task-per-agent enforcement, lease tokens, heartbeats, timeouts, crash
+  recovery, bounded handoffs, hop/fan-out limits, and explicit file/workspace ownership
+  metadata.
+- Add `persistent_delegate`, `agent_task`, and `agent_message` MCP operations, including
+  a short checkpoint fallback that creates a fresh conversation when resume is no longer
+  possible. The same runtime is used by both hosts through thin CLI/MCP adapters.
+
+### Reliability and host compatibility
+
+- Fix the Codex/Claude MCP adapter crash caused by passing `stdin=PIPE` together with
+  `subprocess.run(input=...)`; UTF-8 prompt transport now works without breaking
+  stdin-free calls.
+- Keep background Agy launcher acknowledgements separate from terminal worker results so
+  Strict Stop does not report an in-flight worker as an empty-output failure.
+- Make failed GitHub update checks retry after a short backoff instead of remaining silent
+  for a full day; successful checks retain the normal daily throttle and explicit approval
+  is still required before updating.
+- Preserve strict/soft routing state, quota/fallback safeguards, model discovery, Windows
+  ConPTY handling, and fail-closed worker receipts while adding the runtime integration.
+
+### Verification
+
+- Add regression coverage for parent-owned conversation reuse, lease/task lifecycle,
+  resume fallback, SQLite messaging, MCP stdin transport, update-check retry behavior,
+  routing hooks, and host manifest/server-version consistency.
+
 ## 0.31.50 — Background Agy completion and routing safeguards
 
 - Distinguish an asynchronous Agy launcher acknowledgement from a completed

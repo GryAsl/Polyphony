@@ -6,8 +6,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import sys
+import tempfile
+import time
 import types
 import unittest
 
@@ -56,11 +59,116 @@ class McpAdapterTests(unittest.TestCase):
             ("cloud_debug", {"service": "svc", "print_command": True}, "cloud-debug.sh"),
             ("cost", {"prompt": "p"}, "agy-cost-compare.sh"),
         ]
-        self.assertEqual([tool["name"] for tool in mcp.TOOLS], [case[0] for case in cases])
+        declared = [tool["name"] for tool in mcp.TOOLS]
+        self.assertTrue(all(case[0] in declared for case in cases))
         for name, args, expected in cases:
             with self.subTest(name=name):
                 mcp._dispatch(name, args)
                 self.assertEqual(self.wrapper(), expected)
+
+    def test_persistent_runtime_tools_are_declared(self):
+        tools = {tool["name"]: tool for tool in mcp.TOOLS}
+        self.assertIn("agent_task", tools)
+        self.assertIn("agent_message", tools)
+        self.assertIn("persistent_delegate", tools)
+        self.assertIn("handoff", tools["agent_task"]["inputSchema"]["properties"]["action"]["enum"])
+
+    def test_persistent_delegate_claims_and_reuses_parent_owned_agent(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            old_run = mcp.subprocess.run
+            mcp.subprocess.run = lambda argv, **kwargs: types.SimpleNamespace(
+                returncode=0,
+                stdout="OK\n",
+                stderr='AGY_USAGE {"conversation_id":"conv-1"}\n',
+            )
+            try:
+                first = mcp._dispatch("persistent_delegate", {"prompt": "first", "parent_agent_id": "main", "workspace": tmp})
+                second = mcp._dispatch("persistent_delegate", {"prompt": "second", "parent_agent_id": "main", "agent_id": first["persistent"]["agent_id"], "workspace": tmp})
+                runtime = mcp.Runtime()
+                try:
+                    self.assertEqual(1, len(runtime.list_agents(tmp, "main")))
+                finally:
+                    runtime.close()
+            finally:
+                mcp.subprocess.run = old_run
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+        self.assertEqual(0, first["exit_code"])
+        self.assertEqual(first["persistent"]["agent_id"], second["persistent"]["agent_id"])
+        self.assertEqual("conv-1", second["persistent"]["conversation_id"])
+
+    def test_persistent_delegate_resume_failure_rotates_once_without_duplicate_checkpoint(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        old_shell = mcp._run_shell
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            runtime = mcp.Runtime()
+            seed = runtime.claim_task("main", tmp, "seed")
+            runtime.finish_task(seed["task_id"], seed["lease_token"])
+            runtime.set_conversation(seed["agent_id"], "main", tmp, "old-conversation")
+            runtime.close()
+            calls = []
+
+            def fake_shell(script, argv, cwd=None, stdin_text=None):
+                calls.append(stdin_text)
+                if len(calls) == 1:
+                    return {"exit_code": 2, "stdout": "", "stderr": "conversation not found"}
+                return {"exit_code": 0, "stdout": "OK\n", "stderr": 'AGY_USAGE {"conversation_id":"new-conversation"}\n'}
+
+            mcp._run_shell = fake_shell
+            try:
+                result = mcp._dispatch("persistent_delegate", {"prompt": "continue", "parent_agent_id": "main", "agent_id": seed["agent_id"], "workspace": tmp})
+            finally:
+                mcp._run_shell = old_shell
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+        self.assertTrue(result["resume_fallback"])
+        self.assertEqual("new-conversation", result["persistent"]["conversation_id"])
+        self.assertEqual(2, result["persistent"]["conversation_generation"])
+        self.assertEqual(1, calls[1].count("Checkpoint from the previous conversation generation:"))
+
+    def test_persistent_delegate_recovers_stale_task_with_checkpoint_fallback(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            runtime = mcp.Runtime()
+            seed = runtime.claim_task("main", tmp, "first job")
+            runtime.set_conversation(seed["agent_id"], "main", tmp, "conv-stale")
+            runtime.conn.execute("UPDATE tasks SET lease_expires_at=? WHERE id=?", (time.time() - 10, seed["task_id"]))
+            runtime.close()
+
+            prompts_received = []
+
+            def fake_run(argv, **kwargs):
+                prompts_received.append(kwargs.get("input", ""))
+                return types.SimpleNamespace(
+                    returncode=0,
+                    stdout="OK\n",
+                    stderr='AGY_USAGE {"conversation_id":"conv-fresh"}\n',
+                )
+
+            old_run = mcp.subprocess.run
+            mcp.subprocess.run = fake_run
+            try:
+                result = mcp._dispatch("persistent_delegate", {"prompt": "second job", "parent_agent_id": "main", "agent_id": seed["agent_id"], "workspace": tmp})
+            finally:
+                mcp.subprocess.run = old_run
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+
+        self.assertEqual(0, result["exit_code"])
+        self.assertEqual(2, result["persistent"]["conversation_generation"])
+        self.assertEqual("conv-fresh", result["persistent"]["conversation_id"])
+        self.assertIn("Checkpoint from the previous conversation generation:", prompts_received[0])
+        self.assertIn("Previous task timed out or crashed: first job", prompts_received[0])
 
     def test_packaged_timeout_policy_allows_long_codex_and_claude_calls(self):
         # The two hosts read different files and resolve paths differently, so the
@@ -184,6 +292,18 @@ class McpAdapterTests(unittest.TestCase):
                 self.assertIn("🏰", kwargs.get("input", ""))
                 self.assertNotIn("🏰", " ".join(argv))
 
+    def test_stdin_backed_shell_call_does_not_pass_pipe_and_input_together(self):
+        mcp._run_shell("doctor.sh", [], str(ROOT), "özel prompt")
+        kwargs = self.calls[-1][1]
+        self.assertIsNone(kwargs["stdin"])
+        self.assertEqual("özel prompt", kwargs["input"])
+
+    def test_agent_message_wait_forwards_sender_filter(self):
+        mcp._dispatch("agent_message", {"action": "wait", "workspace": str(ROOT), "to_agent": "to", "from_agent": "from", "timeout": 1})
+        argv = self.calls[-1][0]
+        self.assertIn("--from", argv)
+        self.assertEqual("from", argv[argv.index("--from") + 1])
+
     def test_only_medium_high_and_pro_tiers_are_exposed(self):
         self.assertEqual(mcp.TIER["enum"], ["flash-medium", "flash", "pro"])
         scout = next(tool for tool in mcp.TOOLS if tool["name"] == "scout")
@@ -212,7 +332,7 @@ class McpAdapterTests(unittest.TestCase):
 
     def test_server_version_matches_manifests(self):
         response = mcp.handle_request({"id": 1, "method": "initialize", "params": {}})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.50")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.60")
         negotiated = mcp.handle_request({
             "id": 2,
             "method": "initialize",
@@ -221,7 +341,7 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(negotiated["result"]["protocolVersion"], mcp.PROTOCOL_VERSION)
         for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
             data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
-            self.assertEqual(data["version"], "0.31.50")
+            self.assertEqual(data["version"], "0.31.60")
 
     def test_exit_code_stdout_and_stderr_are_preserved(self):
         def failed(argv, **kwargs):

@@ -126,6 +126,15 @@ instead of pasting code. The Windows idle timeout normally follows the hard dead
 
 **Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. Host-only tools without equivalent Agy access remain advisory. Substantive discovery, implementation, review, tests and Git mutations still require Agy; a short command or the word `python` alone does not make substantive work exempt.
 
+### Persistent subagents
+
+The `persistent_delegate` MCP tool and `polyphony-agent` CLI provide a small SQLite-backed
+registry/message bus for repeated subagent work. A stable `parent_agent_id` may reuse only the
+subagent it created in the same workspace; agents never enter a global pool. Each agent has one
+active task at a time, with leases, heartbeat/stale recovery, bounded delegation, short messages,
+handoff, and a fresh-conversation fallback when resume fails. Claude and Codex use the same Python
+runtime; ordinary `delegate` remains available when isolation is preferred.
+
 ## Gemini quota control
 
 Polyphony tracks both Gemini quota windows (**5h** and **7d**). After a failed, empty, or timed-out
@@ -148,8 +157,10 @@ once per day by default. If a newer version exists, the host asks for explicit a
 shows the Claude- or Codex-specific update command; it never installs silently. After approval,
 verify the version and reload Claude/start a new Codex task so the new plugin is loaded.
 
-The interval and network timeout are configurable with `POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS`
-and `POLYPHONY_UPDATE_CHECK_TIMEOUT_SECONDS`; set `POLYPHONY_UPDATE_CHECK=off` to disable checks.
+The successful-check interval and network timeout are configurable with
+`POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS` and `POLYPHONY_UPDATE_CHECK_TIMEOUT_SECONDS`;
+failed network checks retry after 15 minutes by default and can be tuned with
+`POLYPHONY_UPDATE_FAILURE_RETRY_SECONDS`. Set `POLYPHONY_UPDATE_CHECK=off` to disable checks.
 The manual `/antigravity:update` command follows the same approval rule.
 
 ## Permissions and troubleshooting

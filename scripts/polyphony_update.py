@@ -21,6 +21,7 @@ REPOSITORY = "GryAsl/Polyphony"
 LATEST_RELEASE_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 RAW_MANIFEST_URL = f"https://raw.githubusercontent.com/{REPOSITORY}/master/.claude-plugin/plugin.json"
 DEFAULT_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_FAILURE_RETRY_SECONDS = 15 * 60
 DEFAULT_TIMEOUT_SECONDS = 4
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$")
 
@@ -126,8 +127,10 @@ def check_for_update(plugin_root: str | Path | None = None, now: float | None = 
     current = installed_version(plugin_root)
     state = _read_state()
     interval = _number_env("POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS)
+    failure_interval = _number_env("POLYPHONY_UPDATE_FAILURE_RETRY_SECONDS", DEFAULT_FAILURE_RETRY_SECONDS)
     last_checked = float(state.get("last_checked_at", 0) or 0)
-    if current and current == state.get("installed_version") and current_time - last_checked < interval:
+    retry_interval = failure_interval if state.get("error") else interval
+    if current and current == state.get("installed_version") and current_time - last_checked < retry_interval:
         latest = str(state.get("latest_version", ""))
         available = bool(parse_version(current) and parse_version(latest) and parse_version(latest) > parse_version(current))
         return {"checked": False, "available": available, "current": current, "latest": latest, "url": state.get("latest_url", "")}

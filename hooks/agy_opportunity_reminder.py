@@ -44,6 +44,7 @@ APPROVED_AGY_WRAPPERS = {
     "agy-migrate",
     "agy-cost-compare",
     "cloud-debug",
+    "polyphony-agent",
 }
 
 SHELL_TOOL_NAMES = {
@@ -1090,6 +1091,7 @@ def is_work_producing_agy_call(tool_name: str, tool_input: dict) -> bool:
             "mcp__antigravity__cloud_debug",
             "mcp__antigravity__cost_compare",
             "mcp__antigravity__job_result",
+            "mcp__antigravity__persistent_delegate",
         }:
             return True
         if lowered_name == "mcp__antigravity__job":
@@ -1159,6 +1161,12 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
     ):
         return True
 
+    # Persistent-agent registry and message-bus operations are control-plane
+    # bookkeeping. They must remain available in strict mode; only the actual
+    # persistent_delegate call is work-producing and is gated above.
+    if lowered_name in {"mcp__antigravity__agent_task", "mcp__antigravity__agent_message"}:
+        return True
+
     # Quota shell commands
     if lowered_name in SHELL_TOOL_NAMES:
         cmd = _get_shell_command(tool_input)
@@ -1185,6 +1193,8 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
             if parsed is not None:
                 wrapper, tokens = parsed
                 if wrapper in {"agy-doctor", "agy-trace"}:
+                    return True
+                if wrapper == "polyphony-agent":
                     return True
                 if wrapper == "agy-job" and len(tokens) > 1 and tokens[1].lower() in {"list", "status", "cancel", "cancel-all"}:
                     return True

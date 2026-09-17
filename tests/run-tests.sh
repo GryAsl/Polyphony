@@ -33,6 +33,7 @@ run "strict/soft hook enforcement" "${PY[@]}" "$ROOT/tests/test-opportunity-hook
 run "Polyphony update checker" "${PY[@]}" "$ROOT/tests/test-polyphony-update.py"
 run "compact prompts and local helpers" "${PY[@]}" "$ROOT/tests/test-compact-routing.py"
 run "Codex MCP adapter" "${PY[@]}" "$ROOT/tests/test-codex-mcp.py"
+run "persistent agent runtime" "${PY[@]}" "$ROOT/tests/test-runtime.py"
 run "lean wrapper smoke tests" "$ROOT/tests/test-lean-wrappers.sh"
 
 run "manifest JSON" "${PY[@]}" - "$ROOT" <<'PY'
@@ -58,7 +59,8 @@ for script in \
   "$ROOT/scripts/agy-scout.sh" \
   "$ROOT/scripts/agy-review.sh" \
   "$ROOT/hooks/nudge-delegation.sh" \
-  "$ROOT/hooks/run-opportunity-hook.sh"; do
+  "$ROOT/hooks/run-opportunity-hook.sh" \
+  "$ROOT/bin/polyphony-agent"; do
   run "syntax: ${script#$ROOT/}" bash -n "$script"
 done
 

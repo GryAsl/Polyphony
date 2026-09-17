@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Thin CLI adapter; all state and policy live in scripts/polyphony_runtime.py.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHON=()
+if [ -n "${POLYPHONY_RUNTIME_PYTHON:-}" ] && command -v "$POLYPHONY_RUNTIME_PYTHON" >/dev/null 2>&1; then
+  PYTHON=("$POLYPHONY_RUNTIME_PYTHON")
+elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+  PYTHON=(py -3)
+elif command -v "${AGY_BRIDGE_PYTHON:-python}" >/dev/null 2>&1; then
+  PYTHON=("${AGY_BRIDGE_PYTHON:-python}")
+elif command -v python3 >/dev/null 2>&1; then
+  PYTHON=(python3)
+else
+  echo "polyphony-agent: Python >= 3.9 not found" >&2
+  exit 16
+fi
+exec "${PYTHON[@]}" "$HERE/scripts/polyphony_runtime.py" "$@"

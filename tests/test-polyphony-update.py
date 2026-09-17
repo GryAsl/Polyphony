@@ -64,6 +64,40 @@ class UpdateCheckerTests(unittest.TestCase):
         self.assertTrue(result["checked"])
         self.assertIn("last_checked_at", json.loads((Path(self.temp.name) / "state.json").read_text(encoding="utf-8")))
 
+    def test_network_failure_uses_short_retry_window(self):
+        with mock.patch.object(update, "_latest_release", side_effect=RuntimeError("offline")):
+            first = update.check_for_update(self.manifest_root, now=100)
+        self.assertTrue(first["checked"])
+
+        with mock.patch.object(update, "_latest_release") as fetch:
+            throttled = update.check_for_update(self.manifest_root, now=101)
+            self.assertFalse(throttled["checked"])
+            fetch.assert_not_called()
+
+        with mock.patch.object(update, "_latest_release", return_value=("0.31.41", "https://example.test/release")) as fetch:
+            retried = update.check_for_update(
+                self.manifest_root,
+                now=100 + update.DEFAULT_FAILURE_RETRY_SECONDS,
+            )
+        self.assertTrue(retried["checked"])
+        self.assertTrue(retried["available"])
+        fetch.assert_called_once()
+
+    def test_network_failure_retry_window_is_configurable(self):
+        with mock.patch.dict(os.environ, {"POLYPHONY_UPDATE_FAILURE_RETRY_SECONDS": "30"}):
+            with mock.patch.object(update, "_latest_release", side_effect=RuntimeError("offline")):
+                update.check_for_update(self.manifest_root, now=100)
+
+            with mock.patch.object(update, "_latest_release") as fetch:
+                throttled = update.check_for_update(self.manifest_root, now=129)
+                self.assertFalse(throttled["checked"])
+                fetch.assert_not_called()
+
+            with mock.patch.object(update, "_latest_release", return_value=("0.31.41", "https://example.test/release")):
+                retried = update.check_for_update(self.manifest_root, now=130)
+        self.assertTrue(retried["checked"])
+        self.assertTrue(retried["available"])
+
     def test_hook_context_requires_approval_and_explains_reload(self):
         with mock.patch.object(hook, "check_for_update", return_value={
             "notify": True,

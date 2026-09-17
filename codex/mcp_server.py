@@ -9,7 +9,12 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Any
+
+RUNTIME = Path(__file__).resolve().parents[1] / "scripts" / "polyphony_runtime.py"
+sys.path.insert(0, str(RUNTIME.parent))
+from polyphony_runtime import Runtime, RuntimeErrorBase, canonical_workspace  # noqa: E402
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -208,6 +213,44 @@ TOOLS = [
             ["prompt"],
         ),
     },
+    {
+        "name": "agent_task",
+        "description": "Claim or inspect a persistent Polyphony subagent task. Reuse is restricted to the creating parent agent and workspace.",
+        "inputSchema": _object({
+            "action": {"type": "string", "enum": ["claim", "heartbeat", "finish", "resume_fallback", "agents", "handoff"]},
+            "parent_agent_id": {"type": "string"}, "agent_id": {"type": "string"},
+            "task_id": {"type": "string"}, "lease_token": {"type": "string"},
+            "workspace": DIRECTORY, "summary": {"type": "string"},
+            "parent_task_id": {"type": "string"}, "fresh_agent": {"type": "boolean"},
+            "lease_seconds": {"type": "integer", "minimum": 1},
+            "status": {"type": "string", "enum": ["completed", "failed", "cancelled"]},
+            "checkpoint": {"type": "string"},
+            "from_agent_id": {"type": "string"}, "to_agent_id": {"type": "string"},
+            "max_hops": {"type": "integer", "minimum": 0},
+        }, ["action"]),
+    },
+    {
+        "name": "persistent_delegate",
+        "description": "Run one Agy task through the existing delegate wrapper while safely reusing only the creating parent agent's persistent subagent conversation.",
+        "inputSchema": _object({
+            "prompt": {"type": "string"}, "parent_agent_id": {"type": "string"}, "workspace": DIRECTORY,
+            "agent_id": {"type": "string"}, "parent_task_id": {"type": "string"}, "fresh_agent": {"type": "boolean"},
+            "tier": TIER, "model": {"type": "string"}, "timeout": DURATION, "idle_timeout": {"type": "number", "exclusiveMinimum": 0},
+            "yolo": {"type": "boolean"}, "sandbox": {"type": "boolean"}, "digest": {"type": "boolean"}, "mode": {"type": "string", "enum": ["accept-edits", "plan"]},
+            "lease_seconds": {"type": "integer", "minimum": 1},
+        }, ["prompt", "parent_agent_id"]),
+    },
+    {
+        "name": "agent_message",
+        "description": "Send, read, or wait for short SQLite-backed messages between persistent Polyphony agents.",
+        "inputSchema": _object({
+            "action": {"type": "string", "enum": ["send", "inbox", "wait"]},
+            "workspace": DIRECTORY, "from_agent": {"type": "string"}, "to_agent": {"type": "string"},
+            "message": {"type": "string"}, "message_type": {"type": "string", "enum": ["message", "request", "response", "handoff"]},
+            "task_id": {"type": "string"}, "timeout": {"type": "number", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 500}, "unread_only": {"type": "boolean"},
+        }, ["action"]),
+    },
 ]
 
 
@@ -259,7 +302,9 @@ def _run_shell(
     completed = subprocess.run(
         [_bash(), script_path, *argv],
         cwd=cwd or os.getcwd(),
-        stdin=subprocess.DEVNULL if stdin_text is None else subprocess.PIPE,
+        # subprocess.run creates its own PIPE when input= is supplied. Passing
+        # stdin=PIPE as well raises ValueError on every live stdin-backed MCP call.
+        stdin=subprocess.DEVNULL if stdin_text is None else None,
         input=stdin_text,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -294,6 +339,15 @@ def _run_python(script: str, argv: list[str], cwd: str | None = None) -> dict:
     }
 
 
+def _runtime(args: list[str], cwd: str | None = None) -> dict:
+    completed = subprocess.run(
+        [sys.executable, str(RUNTIME), *args], cwd=cwd or os.getcwd(),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    return {"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
+
+
 def _flag(argv: list[str], args: dict, key: str, option: str) -> None:
     value = args.get(key)
     if value is not None and value != "":
@@ -325,6 +379,99 @@ def _delegate_args(args: dict, include_prompt: bool = True) -> list[str]:
     if include_prompt:
         argv.append(str(args.get("prompt") or ""))
     return argv
+
+
+def _conversation_from_stderr(stderr: str) -> str | None:
+    for line in stderr.splitlines():
+        if not line.startswith("AGY_USAGE "):
+            continue
+        try:
+            value = json.loads(line[len("AGY_USAGE "):])
+        except json.JSONDecodeError:
+            continue
+        conversation = value.get("conversation_id")
+        if conversation:
+            return str(conversation)
+    return None
+
+
+def _persistent_delegate(args: dict) -> dict:
+    workspace = canonical_workspace(args.get("workspace") or args.get("directory") or os.getcwd())
+    parent = str(args.get("parent_agent_id") or "")
+    prompt = str(args.get("prompt") or "")
+    if not parent or not prompt:
+        raise ValueError("persistent_delegate requires prompt and parent_agent_id")
+    runtime = Runtime()
+    heartbeat_stop = threading.Event()
+    heartbeat_thread: threading.Thread | None = None
+    try:
+        lease_seconds = int(args.get("lease_seconds") or 3600)
+        claim = runtime.claim_task(
+            parent, workspace, prompt,
+            agent_id=args.get("agent_id"),
+            parent_task_id=args.get("parent_task_id"),
+            fresh_agent=bool(args.get("fresh_agent")),
+            lease_seconds=lease_seconds,
+        )
+
+        def heartbeat_loop() -> None:
+            worker_runtime = Runtime(runtime.path)
+            try:
+                while not heartbeat_stop.wait(max(1.0, min(60.0, lease_seconds / 3))):
+                    worker_runtime.heartbeat(claim["task_id"], claim["lease_token"], lease_seconds)
+            finally:
+                worker_runtime.close()
+
+        heartbeat_thread = threading.Thread(target=heartbeat_loop, name="polyphony-task-heartbeat", daemon=True)
+        heartbeat_thread.start()
+        boundary = f"--- NEW POLYPHONY TASK {claim['task_id']} ---\nPrevious context is background only. Focus on this objective.\n"
+        checkpoint = claim.get("checkpoint")
+        if checkpoint:
+            boundary += f"Checkpoint from the previous conversation generation:\n{checkpoint}\n"
+        delegated = dict(args)
+        delegated["directory"] = workspace
+        delegated["prompt"] = boundary + "\nObjective:\n" + prompt
+        if claim.get("conversation_id"):
+            delegated["conversation"] = claim["conversation_id"]
+        delegated["digest"] = True if args.get("digest") is None else args.get("digest")
+        argv = _delegate_args(delegated, include_prompt=False)
+        argv.append("-")
+        receipt = _run_shell("agy-delegate.sh", argv, workspace, delegated["prompt"])
+        resume_failed = bool(claim.get("conversation_id")) and any(
+            marker in receipt["stderr"].lower()
+            for marker in ("conversation not found", "invalid conversation", "unknown conversation", "cannot resume")
+        )
+        if resume_failed and receipt["exit_code"] != 0:
+            checkpoint = str(claim.get("checkpoint") or "Previous conversation could not be resumed; treat repository state as authoritative.")
+            rotated = runtime.resume_fallback(claim["agent_id"], parent, workspace, checkpoint)
+            claim["conversation_id"] = rotated["conversation_id"]
+            claim["conversation_generation"] = rotated["conversation_generation"]
+            claim["checkpoint"] = rotated["checkpoint"]
+            delegated.pop("conversation", None)
+            fallback_boundary = (
+                f"--- NEW POLYPHONY TASK {claim['task_id']} ---\n"
+                "Previous context is background only. Focus on this objective.\n"
+                f"Checkpoint from the previous conversation generation:\n{checkpoint}\n"
+            )
+            delegated["prompt"] = fallback_boundary + "\nObjective:\n" + prompt
+            argv = _delegate_args(delegated, include_prompt=False)
+            argv.append("-")
+            receipt = _run_shell("agy-delegate.sh", argv, workspace, delegated["prompt"])
+            receipt["resume_fallback"] = True
+        conversation = _conversation_from_stderr(receipt["stderr"])
+        if receipt["exit_code"] == 0 and receipt["stdout"].strip():
+            if conversation:
+                runtime.set_conversation(claim["agent_id"], parent, workspace, conversation)
+            runtime.finish_task(claim["task_id"], claim["lease_token"], "completed")
+        else:
+            runtime.finish_task(claim["task_id"], claim["lease_token"], "failed")
+        receipt["persistent"] = {"task_id": claim["task_id"], "agent_id": claim["agent_id"], "conversation_id": conversation or claim.get("conversation_id"), "conversation_generation": claim["conversation_generation"]}
+        return receipt
+    finally:
+        heartbeat_stop.set()
+        if heartbeat_thread is not None:
+            heartbeat_thread.join(timeout=2)
+        runtime.close()
 
 
 def _dispatch(name: str, args: dict) -> dict:
@@ -466,6 +613,53 @@ def _dispatch(name: str, args: dict) -> dict:
         argv.append("-")
         return _run_shell("agy-cost-compare.sh", argv, stdin_text=str(args.get("prompt") or ""))
 
+    if name == "agent_task":
+        action = str(args.get("action") or "")
+        workspace = str(args.get("workspace") or os.getcwd())
+        if action == "claim":
+            argv = ["claim", "--parent", str(args.get("parent_agent_id") or ""), "--workspace", workspace, "--summary", str(args.get("summary") or "")]
+            for key, option in (("agent_id", "--agent"), ("parent_task_id", "--parent-task"), ("lease_seconds", "--lease")):
+                _flag(argv, args, key, option)
+            _switch(argv, args, "fresh_agent", "--fresh-agent")
+        elif action == "heartbeat":
+            argv = ["heartbeat", str(args.get("task_id") or ""), str(args.get("lease_token") or "")]
+            _flag(argv, args, "lease_seconds", "--lease")
+        elif action == "finish":
+            argv = ["finish", str(args.get("task_id") or ""), str(args.get("lease_token") or "")]
+            _flag(argv, args, "status", "--status")
+        elif action == "resume_fallback":
+            argv = ["resume-fallback", "--agent", str(args.get("agent_id") or ""), "--parent", str(args.get("parent_agent_id") or ""), "--workspace", workspace, "--checkpoint", str(args.get("checkpoint") or "")]
+        elif action == "agents":
+            argv = ["agents", "--workspace", workspace]
+            _flag(argv, args, "parent_agent_id", "--parent")
+        elif action == "handoff":
+            argv = ["handoff", str(args.get("task_id") or ""), "--from", str(args.get("from_agent_id") or ""), "--to", str(args.get("to_agent_id") or ""), "--token", str(args.get("lease_token") or "")]
+            _flag(argv, args, "lease_seconds", "--lease")
+            _flag(argv, args, "max_hops", "--max-hops")
+        else:
+            raise ValueError("agent_task action must be claim, heartbeat, finish, resume_fallback, agents, or handoff")
+        return _runtime(argv, workspace)
+
+    if name == "persistent_delegate":
+        return _persistent_delegate(args)
+
+    if name == "agent_message":
+        action = str(args.get("action") or "")
+        workspace = str(args.get("workspace") or os.getcwd())
+        if action == "send":
+            argv = ["send", "--workspace", workspace, "--from", str(args.get("from_agent") or ""), "--to", str(args.get("to_agent") or ""), "--message", str(args.get("message") or "")]
+            _flag(argv, args, "task_id", "--task"); _flag(argv, args, "message_type", "--type")
+        elif action == "inbox":
+            argv = ["inbox", "--workspace", workspace, "--to", str(args.get("to_agent") or "")]
+            _flag(argv, args, "from_agent", "--from"); _flag(argv, args, "task_id", "--task"); _flag(argv, args, "limit", "--limit")
+            if args.get("unread_only") is False: argv.append("--all")
+        elif action == "wait":
+            argv = ["wait", "--workspace", workspace, "--to", str(args.get("to_agent") or "")]
+            _flag(argv, args, "from_agent", "--from"); _flag(argv, args, "task_id", "--task"); _flag(argv, args, "timeout", "--timeout")
+        else:
+            raise ValueError("agent_message action must be send, inbox, or wait")
+        return _runtime(argv, workspace)
+
     raise KeyError(name)
 
 
@@ -484,7 +678,7 @@ def _tool_result(req_id: Any, name: str, args: dict) -> dict:
     try:
         receipt = _dispatch(name, args)
         failed = receipt["exit_code"] != 0
-    except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+    except (FileNotFoundError, KeyError, TypeError, ValueError, RuntimeErrorBase) as exc:
         receipt = {"exit_code": 1, "stdout": "", "stderr": str(exc)}
         failed = True
     text = json.dumps(receipt, ensure_ascii=False)
@@ -515,7 +709,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.50"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.60"},
             },
         }
     if method == "notifications/initialized":
