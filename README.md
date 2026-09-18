@@ -64,24 +64,35 @@ Start a new Codex task after installation. The plugin provides direct MCP tools 
 
 ## Routing modes
 
-Polyphony has two session-level modes:
+Polyphony defaults to **soft**, with optional strict routing:
 
 - **Strict:** Substantive Agy-capable work is delegated to Agy/Gemini; tiny local helpers,
   bounded small-file operations, and host-only tools remain available. A strict turn needs a
-  completed successful Agy result before it can stop.
+  completed successful Agy result after substantive work starts. Conversation and clarification
+  alone never require a worker; pending or failed workers cannot be disguised as success.
 - **Soft:** Delegation reminders are advisory and native execution remains allowed.
 
 <p align="center">
   <img src="docs/agy-routing-modes.png" alt="Polyphony soft and strict routing mode selection" width="900">
 </p>
 
-**Session start:** The workspace choice is asked once, persisted across new conversations,
-reboots, app restarts, reconnects, resume, and compact events, and restored without repeating the
-question. Until a valid choice exists, substantive work stays behind the strict gate.
+**Session start:** No mode question is required. Explicit workspace preferences persist across
+new conversations, reboots, reconnects and resume; missing or damaged preferences fall back to soft.
 
-**Control-plane exceptions:** Mode changes, quota checks/choices, job/trace/doctor/cancel management, bootstrap policy reading, bounded local conductor checks, and conversational user interaction are exempt from delegation gating.
+**Control-plane exceptions:** Mode changes, quota/job/doctor/trace management, approved host plugin
+updates, version checks, skill/MCP discovery, session management, bounded conductor checks and user
+interaction remain native. Editing the code that implements those features is still repository work.
 
-**Manual switching:** Explicitly switch anytime with unambiguous phrasing such as "switch Agy mode to strict" or "set Agy mode to soft".
+**Manual switching:** Use "switch Agy mode to strict", "set Agy mode to soft", or "soft moda geç".
+The host must receive a successful persistence receipt before claiming a preference was saved.
+
+### Shared workflow
+
+Both hosts receive the same lean execution policy from the plugin; a custom global `CLAUDE.md`
+or `AGENTS.md` is not required. Clear, low-risk tasks use one scoped worker end-to-end, including
+discovery, implementation, proportional checks and authorized publishing. Independent review is
+optional for routine work and required when risk or an explicit request justifies it. See the
+[shared workflow](docs/WORKFLOW.md) for planning, parallel ownership and compact receipts.
 
 ## Model routing
 
@@ -165,9 +176,37 @@ The manual `/antigravity:update` command follows the same approval rule.
 
 ## Permissions and troubleshooting
 
+Contributor checks are offline and require no API keys or cloud setup. Run
+`bash tests/run-tests.sh` for the short smoke suite; extended tests are opt-in with `--full`.
+Documentation-only changes do not trigger automatic CI. See [Contributing](CONTRIBUTING.md).
+
 Run write-capable tasks on a trusted branch. `--yolo` grants the worker broad access to
 files, commands, network access, and process-visible credentials; it remains explicit
 unless enabled in plugin or environment settings.
+
+To opt into automatic `--yolo` for write-capable delegates, set Claude's `always_yolo` plugin
+option to `on`, or use the cross-host environment setting:
+
+```powershell
+# Windows: current shell and future desktop/CLI processes
+$env:AGY_ALWAYS_YOLO = '1'
+[Environment]::SetEnvironmentVariable('AGY_ALWAYS_YOLO', '1', 'User')
+```
+
+```bash
+# macOS/Linux: export from the environment that launches your host
+export AGY_ALWAYS_YOLO=1
+```
+
+Restart Claude/Codex after changing persistent environment settings. Remove the variable or set it
+to `0` to disable this override. Scouting remains read-only and does not inherit automatic yolo.
+This is an opt-in permission setting, not authorization to push, delete data or touch unrelated files.
+
+Hooks resolve Python independently of the shell's working directory and fall back from
+`AGY_BRIDGE_PYTHON` to installed interpreters. For a custom Python installation, point
+`AGY_BRIDGE_PYTHON` at its executable. The MCP server also requires `python` on the host's PATH;
+enable that option when installing Python and restart the host. Missing hook Python produces a
+rate-limited setup warning and disables enforcement instead of flooding every tool call with errors.
 
 If a call fails, run `/antigravity:setup` in Claude Code, the `doctor` MCP tool in Codex, or `agy-doctor` from Git Bash. More diagnostics are in [Troubleshooting](docs/TROUBLESHOOTING.md).
 

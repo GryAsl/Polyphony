@@ -16,15 +16,17 @@ label.
 
 ## Dev setup
 
-You need the [Antigravity CLI](https://antigravity.google/docs/cli-using) (`agy`,
-authenticated — `agy models` should list Gemini models) and Claude Code.
+Offline checks need only Python 3.9+, Bash and Git. On native Windows, use Git Bash.
+No API key, cloud project, GitHub App, authenticated `agy`, Claude subscription or Codex
+installation is needed to contribute or run CI. Real worker smoke tests are optional and
+require your own installed/authenticated Antigravity CLI and host.
 
 ```bash
 git clone https://github.com/GryAsl/Polyphony ~/Polyphony
 cd ~/Polyphony
 
 # load the plugin live from your working tree ($CLAUDE_PLUGIN_ROOT resolves):
-claude --plugin-dir ~/antigravity-for-claude-code
+claude --plugin-dir ~/Polyphony
 ```
 
 The scripts also run standalone — handy for quick iteration:
@@ -36,11 +38,18 @@ scripts/agy-delegate.sh --tier flash-medium "Summarize this in 3 bullets: ..."
 ## Before you open a PR
 
 ```bash
-bash tests/run-tests.sh          # dependency-free; stubs `agy`, no network
-shellcheck scripts/*.sh tests/*.sh   # CI gates on --severity=error
+bash tests/run-tests.sh          # short offline smoke suite; no API keys
+# Optional, only for broader changes:
+bash tests/run-tests.sh --full
 ```
 
-- **Tests pass** and shellcheck is clean (CI runs both — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
+- You do not need to run the full suite for every PR. CI runs short, deterministic checks;
+  pure README/contributor-guide/docs changes skip automatic CI. Skills and runtime policy changes
+  still run it. Extended tests stay available for platform/security/concurrency changes.
+- CI never invokes a paid AI reviewer. Review is human or explicitly requested by a maintainer;
+  missing review credentials cannot fail a contributor's checks.
+- ShellCheck errors are checked when available; Bash syntax is the fallback. See
+  [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 - If you touch a manifest, `python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"` (and `marketplace.json`, `prices.json`) still parse.
 - **Keep the skill honest.** [`skills/antigravity/SKILL.md`](skills/antigravity/SKILL.md) is the plugin's brain — if behavior changes, update it. Don't claim a capability the code doesn't have.
 - **Cost numbers are estimates.** If you quote figures, say so and point at `prices.json`.

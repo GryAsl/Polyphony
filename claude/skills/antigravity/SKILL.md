@@ -1,6 +1,6 @@
 ---
 name: antigravity
-description: Run the Antigravity CLI (Gemini) as a collaborating AI inside Claude Code, with intelligent model routing across the software development lifecycle. Claude is the conductor/orchestrator — requirements, architecture, the hard 20%, verification, and review — and routes deterministic, high-volume work (scaffolding, boilerplate, test generation, first-pass review, migrations, web/Vertex AI Search) to Antigravity (Gemini), the cheaper, faster model. Use when the user wants to "use Antigravity / agy", "vibe code / agentic engineering", "accelerate the SDLC", "delegate to Gemini", "scaffold / generate tests / migrate", "first-pass code review", "search web or internal/company data", "deep research / multi-source research report", "second-model cross-check", or "lower token cost on a big job". Claude always verifies Antigravity's output and re-checks itself if unsatisfied.
+description: Delegate scoped repository work, scouting, review, research, media and diagnostics to Antigravity workers from Claude Code. Use for Agy delegation and multi-model workflows; consume compact evidence rather than repeating the worker's clean work.
 ---
 
 # Polyphony — hybrid SDLC orchestration
@@ -21,15 +21,21 @@ the model — routing, shared rules, verification gates — not raw generation.
 
 ## Routing modes (session-level enforcement)
 
+Use the bundled [shared workflow](../../../docs/WORKFLOW.md) for routine execution, risk review,
+parallel ownership, planning and authorized publishing. It does not depend on a private global
+CLAUDE.md. One scoped worker can handle a routine request end-to-end, including small tasks;
+optional fresh Agy review remains available. Do not reread full files/diffs or repeat clean checks
+without a finding, conflicting evidence, immediate safety need or explicit user request.
+
 Polyphony provides two session-level routing modes:
 - **Always use Agy (strict)**: Substantive Agy-capable work (discovery, implementation/edits, diff review, tests/build/lint diagnosis, Git operations, web research, media analysis, subagents, and general terminal automation) is gated and must be delegated to Antigravity wrappers or MCP tools. Substantive turns require a completed, successful Agy work call (exit code 0, non-empty output).
 - **Use Agy when appropriate (soft)**: Non-blocking advisory reminders; native execution remains permitted.
 
-**Default & session start:** The first session for a workspace asks once for strict or soft; until
-the answer is known, substantive native work is held to the strict gate. The explicit choice is
-persisted per workspace and restored across new conversations, compact, reconnect, resume, reboot,
-and Claude/Codex app restart. Never repeat the question when a valid choice is already known or
-persisted; ask again only when no valid workspace choice exists.
+**Default & session start:** Soft is the default, without a mode question. Explicit workspace
+preferences persist across restarts/resume; missing or damaged preferences fall back to soft.
+Strict gates substantive actions, not greetings, explanations or clarification alone. Asking a
+question does not erase failed/pending work. Never repeat a mode question merely because a hook
+or MCP connection was reset, and report a saved choice only after a successful persistence receipt.
 
 **Control-plane exceptions:** Mode recording/changes, quota checks/choices, job/trace/doctor/cancel management, reading bootstrap policy/config, bounded local conductor checks, and user interaction are exempt from delegation gating.
 
@@ -43,7 +49,7 @@ short 1–5 minute limits for health probes. Leave the Windows idle timeout deri
 hard deadline unless there is evidence of a true stall, so a quiet but progressing worker
 is not killed prematurely.
 
-**Manual mode switching:** Users can explicitly change the mode at any time with unambiguous phrasing such as "switch Agy mode to strict" or "set Agy mode to soft".
+**Manual mode switching:** Use "switch Agy mode to strict", "set Agy mode to soft" or "soft moda geç".
 
 ## Two execution styles (pick per task)
 
@@ -62,14 +68,14 @@ Route each phase to the right model. This is the core policy.
 |---|---|---|
 | Requirements & planning | **Claude** | ambiguity, human-paced judgement |
 | Design & architecture | **Claude** | trade-offs; most human-centric |
-| Implementation — complex / architecture-bearing (the 20%) | **Claude** | correctness, deep context |
+| Implementation — complex / architecture-bearing | **agy High**, Claude scopes | compact execution evidence |
 | Implementation — scaffolding / boilerplate / well-specified | **agy** | deterministic, high volume |
 | Test & eval generation | **agy** (Claude defines the contract) | cheaper-model territory |
-| First-pass code review | **agy** → **Claude** final | AI as first-pass reviewer |
-| Cross-model verification (output + trajectory) | **both** | two model families ≠ same failure |
+| Code review | **agy**; Claude consumes verdict | independent review when risk warrants |
+| Cross-model verification (output + trajectory) | **fresh agy worker**, conductor escalates findings | avoid duplicated full-file reads |
 | Maintenance / migration / modernization | **agy** executes, **Claude** directs | tedious, systematic |
-| Web / Vertex AI Search | **agy** → **Claude** re-checks | tools Claude lacks natively |
-| Audio / video understanding | **agy** transcribes + digests · **Claude** verifies | Gemini is natively multimodal; no local ffmpeg/speech stack |
+| Web / Vertex AI Search | **agy** → compact cited evidence | keep bulky sources out of conductor context |
+| Audio / video understanding | **agy** transcribes + digests; fresh review if useful | Gemini is natively multimodal |
 | Deep research (multi-source) | **agy** fans out search/fetch · **Claude** plans, verifies ≥2 sources, synthesizes | offload bulky pages to cheap Gemini; frontier model judges |
 
 Routing tier within agy: `flash` (High, default) · `flash-medium` (an explicit option

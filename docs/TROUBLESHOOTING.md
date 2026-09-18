@@ -6,6 +6,32 @@ the plugin version, agy version/auth state, and platform warnings.
 
 ---
 
+## Routing hook cannot find Python or looks under Git's installation directory
+
+An unresolved `${PLUGIN_ROOT}` in a Claude hook produces paths such as
+`C:\Program Files\Git\hooks\agy_opportunity_reminder.py`. Claude uses
+`${CLAUDE_PLUGIN_ROOT}`; Codex also supplies that compatibility alias. Polyphony now uses one
+explicit `claude/hooks/hooks.json` bindings for both hosts with interpreter-resolving launchers.
+The default `hooks/hooks.json` removed in 0.31.61 stays absent; there is no second auto-discovered
+manifest alongside Claude's explicit binding.
+
+Install Python 3.9+ with its executable on PATH, or set `AGY_BRIDGE_PYTHON` to the correct Python
+executable for hooks/ConPTY. Restart the host after environment changes. A missing hook interpreter
+produces at most one daily setup warning and exits non-blocking; enforcement is not active until
+repaired. MCP bootstrap additionally needs `python` on the host's PATH. For `CONNECTION_CLOSED`,
+inspect the server's startup stderr and repair its interpreter/dependencies before reconnecting;
+changing routing mode is not a fix for an unavailable MCP server.
+
+Soft is the default. A statement like "soft moda geç" records an explicit workspace preference;
+the model must not claim the preference was saved without a successful hook receipt. Conversation,
+clarification and approved host plugin updates are control-plane; editing plugin code is not.
+
+Remove only confirmed duplicate old global Polyphony hook registrations, not unrelated hooks.
+Do not copy private plugin-cache paths into a shared configuration. Codex hook definitions must
+be reviewed and trusted before they can enforce strict routing.
+
+---
+
 ## "`/scripts/agy-delegate.sh: No such file or directory`" or `$CLAUDE_PLUGIN_ROOT` is empty
 
 **Cause:** you're on a plugin version < 0.14.0. `$CLAUDE_PLUGIN_ROOT` is only substituted

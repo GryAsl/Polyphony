@@ -162,3 +162,7 @@ def check_for_update(plugin_root: str | Path | None = None, now: float | None = 
         state["notified_version"] = ""
     _write_state(state)
     return {"checked": True, "available": available, "notify": notify, "current": current, "latest": latest, "url": url}
+
+
+if __name__ == "__main__":
+    print(json.dumps(check_for_update(), ensure_ascii=False))

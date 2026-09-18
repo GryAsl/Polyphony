@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.31.62 — Portable routing fixes and contributor-friendly CI
+
+- Preserve every 0.31.61 removal and CI trigger fix. Explicitly bind both hosts to
+  `claude/hooks/hooks.json`; do not restore the removed default `hooks/hooks.json`.
+- Use interpreter-resolving UTF-8 Windows launchers;
+  avoid duplicate Claude registration and rate-limit missing-Python setup warnings.
+- Default missing routing preferences to soft, support explicit Turkish mode changes and report
+  state persistence failures instead of claiming success.
+- Gate substantive actions rather than user prose; allow narrow host administration and clarification
+  without letting questions erase pending/failed worker evidence.
+- Bundle lean routine/risk/parallel/planning/publishing guidance for both hosts and document opt-in yolo.
+- Remove automatic internal/external Claude review workflows that require maintainer credentials.
+  Keep one short, offline CI smoke suite; extended regressions remain opt-in with `--full`.
+
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 

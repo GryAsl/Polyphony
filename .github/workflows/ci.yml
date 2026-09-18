@@ -3,23 +3,38 @@ name: CI
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
       - name: ShellCheck (errors gate)
-        run: shellcheck --severity=error scripts/*.sh tests/*.sh hooks/*.sh
-
-      - name: ShellCheck (warnings, advisory)
-        run: shellcheck --severity=warning scripts/*.sh tests/*.sh hooks/*.sh || true
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck --severity=error scripts/*.sh tests/*.sh hooks/*.sh
+          else
+            for script in scripts/*.sh tests/*.sh hooks/*.sh; do bash -n "$script"; done
+          fi
 
       - name: Python compile
         run: python3 -m py_compile scripts/measure-session.py scripts/agy-windows-bridge.py tests/test-windows-bridge.py
@@ -34,5 +49,5 @@ jobs:
               print("ok", p)
           PY
 
-      - name: Tests (stubs agy; no network)
+      - name: Critical smoke tests (offline; no API keys)
         run: bash tests/run-tests.sh

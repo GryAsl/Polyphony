@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 import time
@@ -215,30 +217,6 @@ DENIAL_INSTRUCTIONS = {
     "terminal": "Strict mode: general terminal automation must use `agy-delegate` (or Codex `mcp__antigravity__delegate`). Native shell execution is denied.",
 }
 
-PENDING_DENIAL_INSTRUCTION = (
-    "Agy routing mode selection is pending. Substantive work is denied until the user chooses:\n"
-    "- Always use Agy (strict)\n"
-    "- Use Agy when appropriate (soft)\n"
-    "Ask the user to select a mode first."
-)
-
-SESSION_START_CONTEXT = (
-    "[Agy routing] Routing mode is unanswered. Strict routing is effective: all substantive work must be routed to Agy.\n"
-    "At the first user-facing turn, ask the user exactly one concise question with these visible choices:\n"
-    "- Always use Agy (strict)\n"
-    "- Use Agy when appropriate (soft)\n"
-    "Keep the user's substantive request in mind and resume it immediately after the choice."
-)
-
-PENDING_PROMPT_CONTEXT = (
-    "[Agy routing] Routing mode is unanswered. Strict routing is effective: all substantive work must be routed to Agy.\n"
-    "Before performing substantive work, ask the user to select a routing mode:\n"
-    "- Always use Agy (strict)\n"
-    "- Use Agy when appropriate (soft)\n"
-    "Keep the user's substantive request in mind and resume it immediately after the choice."
-)
-
-
 def _polyphony_update_context() -> str:
     if str(os.environ.get("POLYPHONY_UPDATE_CHECK", "on")).strip().lower() in {"0", "false", "no", "off"}:
         return ""
@@ -276,7 +254,10 @@ def _state_dir() -> Path:
     configured = os.environ.get("AGY_ROUTING_STATE_DIR")
     if configured:
         p = Path(configured).expanduser()
-        p.mkdir(parents=True, exist_ok=True)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # Preserve the configured target; writes report failure explicitly.
         return p
     for env_var in ("PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
         val = os.environ.get(env_var)
@@ -293,7 +274,10 @@ def _state_dir() -> Path:
         return p
     except Exception:
         p = Path(tempfile.gettempdir()) / "claude-agy-routing"
-        p.mkdir(parents=True, exist_ok=True)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         return p
 
 
@@ -352,9 +336,9 @@ def _read_persisted_workspace_mode(data: dict | None = None) -> str | None:
     return None
 
 
-def _write_persisted_workspace_mode(mode: str, data: dict | None = None) -> None:
+def _write_persisted_workspace_mode(mode: str, data: dict | None = None) -> bool:
     if mode not in {"strict", "soft"}:
-        return
+        return False
     path = _workspace_state_path(data)
     try:
         temporary = path.with_suffix(f".{os.getpid()}.tmp")
@@ -365,13 +349,14 @@ def _write_persisted_workspace_mode(mode: str, data: dict | None = None) -> None
         }
         temporary.write_text(json.dumps(payload), encoding="utf-8")
         os.replace(temporary, path)
+        return _read_persisted_workspace_mode(data) == mode
     except Exception:
-        pass
+        return False
 
 
 def _default_state() -> dict:
     return {
-        "mode": None,
+        "mode": "soft",
         "question_presented": False,
         "turn_id": "",
         "is_substantive": False,
@@ -388,12 +373,14 @@ def _default_state() -> dict:
         "warned_categories": [],
         "continuation_count": 0,
         "user_mode_selection": False,
+        "awaiting_user_input": False,
     }
 
 
 def _read_state(session_id: str, data: dict | None = None) -> dict:
     path = _session_state_path(session_id)
     state = _default_state()
+    loaded = {}
     try:
         if path.exists():
             loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -404,27 +391,26 @@ def _read_state(session_id: str, data: dict | None = None) -> dict:
     except Exception:
         pass
 
-    session_mode = state.get("mode")
-    if session_mode in {"strict", "soft"}:
+    if isinstance(loaded, dict) and loaded.get("mode") in {"strict", "soft"}:
         return state
-
     persisted_mode = _read_persisted_workspace_mode(data)
     if persisted_mode in {"strict", "soft"}:
         state["mode"] = persisted_mode
-        state["question_presented"] = True
-    else:
-        state["mode"] = None
+        state["question_presented"] = False
+    elif state.get("mode") not in {"strict", "soft"}:
+        state["mode"] = "soft"
     return state
 
 
-def _write_state(session_id: str, state: dict) -> None:
+def _write_state(session_id: str, state: dict) -> bool:
     path = _session_state_path(session_id)
     try:
         temporary = path.with_suffix(f".{os.getpid()}.tmp")
         temporary.write_text(json.dumps(state), encoding="utf-8")
         os.replace(temporary, path)
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _delete_state(session_id: str) -> None:
@@ -700,6 +686,7 @@ def _is_sensitive_small_edit(path: str) -> bool:
     name = Path(path).name.lower()
     return (
         name in POLICY_FILES
+        or name in {"plugin.json", "hooks.json", "settings.json", "settings.local.json", "config.toml", "manifest.json"}
         or name.startswith(".env")
         or name.endswith((".lock", ".pem", ".key", ".pfx", ".p12"))
         or any(part in normalized for part in (
@@ -725,6 +712,8 @@ def _bounded_native_operation(data: dict, tool_name: str, tool_input: dict, stat
 
     lowered = tool_name.lower()
     path = _path_from(tool_input)
+    if _is_sensitive_small_edit(path):
+        return None
     resolved = _bounded_native_path(data, path)
     if resolved is None:
         return None
@@ -1142,7 +1131,16 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
     if _small_local_helper(tool_name, tool_input):
         return True
 
-    if lowered_name in {"askuserquestion", "request_user_input", "ask_user_question"}:
+    if lowered_name in {"askuserquestion", "request_user_input", "request_user_input_async", "ask_user_question", "functions.request_user_input", "functions.request_user_input_async"}:
+        return True
+    if lowered_name.startswith("mcp__codex_app__"):
+        return lowered_name.removeprefix("mcp__codex_app__") in {
+            "list_threads", "read_thread", "wait_threads", "list_projects",
+            "navigate_to_codex_page", "open_in_codex", "create_thread", "fork_thread",
+            "send_message_to_thread", "set_thread_title", "set_thread_archived",
+            "get_usage_limits", "read_thread_terminal",
+        }
+    if lowered_name in SHELL_TOOL_NAMES and _host_control_shell(_get_shell_command(tool_input) or ""):
         return True
     if lowered_name in CLAUDE_ONLY_TOOLS:
         return True
@@ -1199,6 +1197,39 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
                 if wrapper == "agy-job" and len(tokens) > 1 and tokens[1].lower() in {"list", "status", "cancel", "cancel-all"}:
                     return True
 
+    return False
+
+
+def _host_control_shell(command: str) -> bool:
+    """Host administration only; never exempt arbitrary update/test scripts."""
+    if _has_unquoted_shell_control(command) or "$" in command or "`" in command:
+        return False
+    try:
+        # This exact allowlist needs paths literally, not POSIX backslash escapes.
+        tokens = shlex.split(command, posix=False)
+        tokens = [token[1:-1] if len(token) >= 2 and token[0] == token[-1] and token[0] in {"'", '"'} else token for token in tokens]
+    except ValueError:
+        return False
+    if tokens in (["claude", "--version"], ["codex", "--version"]):
+        return True
+    if len(tokens) >= 3 and tokens[:2] in (["claude", "plugin"], ["codex", "plugin"]):
+        if tokens[2:] == ["list"]:
+            return True
+        if tokens == ["claude", "plugin", "update", "antigravity@polyphony", "-y"]:
+            return True
+        if tokens == ["codex", "plugin", "marketplace", "upgrade", "polyphony"]:
+            return True
+        return len(tokens) == 4 and tokens[2] in {"add", "install", "update"} and tokens[3] == "antigravity@polyphony"
+    if len(tokens) == 2 and Path(tokens[0]).name.lower() in {"python", "python3", "python.exe", "python3.exe"}:
+        try:
+            return Path(tokens[1]).resolve() == Path(__file__).resolve().parents[1] / "scripts" / "polyphony_update.py"
+        except OSError:
+            return False
+    if len(tokens) == 3 and tokens[:2] == ["py", "-3"]:
+        try:
+            return Path(tokens[2]).resolve() == Path(__file__).resolve().parents[1] / "scripts" / "polyphony_update.py"
+        except OSError:
+            return False
     return False
 
 
@@ -1482,6 +1513,17 @@ def parse_mode_switch_intent(text: str) -> tuple[str | None, bool]:
         return None, False
 
     cleaned = text.strip().lower()
+    # Explicit Turkish imperatives, not quoted examples, questions or negations.
+    turkish = text.strip().translate(str.maketrans("ıİşŞğĞüÜöÖçÇ", "iIsSgGuUoOcC")).lower()
+    if not any(q in cleaned for q in ('"', "'", "`", "?")):
+        match = re.match(
+            r"^(?:lutfen\s+)?(?:(?:agy|polyphony)\s+)?(?:modunu\s+)?"
+            r"(strict|soft)\s+(?:mod(?:a|una|u|unu)?\s+)?(?:gec|yap|ayarla|degistir)(?=$|[\s.,;])",
+            turkish,
+        )
+        if match:
+            tail = turkish[match.end():].strip(" .,!;")
+            return match.group(1), not tail
     if "?" in cleaned or re.match(r"^(?:please\s+)?(?:do not|don't|dont|never)\b", cleaned):
         return None, False
     norm = re.sub(r"^[^\w\d(]+|[^\w\d)]+$", "", cleaned)
@@ -1540,6 +1582,7 @@ def parse_mode_selection_intent(text: str) -> tuple[str | None, bool]:
     if norm in {
         "1", "strict", "always", "7/24", "24/7",
         "always use agy", "always use agy (strict)", "always use agy strict",
+        "her zaman agy (strict)",
     }:
         return "strict", True
     if re.fullmatch(
@@ -1551,6 +1594,7 @@ def parse_mode_selection_intent(text: str) -> tuple[str | None, bool]:
     if norm in {
         "2", "soft", "when appropriate", "appropriate",
         "use agy when appropriate", "use agy when appropriate (soft)", "use agy when appropriate soft",
+        "uygun olduğunda agy (soft)",
     }:
         return "soft", True
     if re.fullmatch(
@@ -1736,7 +1780,7 @@ def handle_session_start(data: dict, session_id: str) -> None:
         state = _default_state()
         state["mode"] = current_mode
         if current_mode in {"strict", "soft"}:
-            state["question_presented"] = True
+            state["question_presented"] = False
 
     state["turn_id"] = ""
     state["is_substantive"] = False
@@ -1753,30 +1797,43 @@ def handle_session_start(data: dict, session_id: str) -> None:
     state["warned_categories"] = []
     state["continuation_count"] = 0
     state["user_mode_selection"] = False
+    state["awaiting_user_input"] = False
+    state["question_presented"] = False
 
     update_context = _polyphony_update_context()
+    # Preserve the old lightweight setup warning without a second hook process
+    # or launching a headless Windows CLI. Full diagnostics remain agy-doctor.
+    agy_path = os.environ.get("AGY_PATH", "")
+    native_agy = Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe"
+    setup_notes = []
+    if not (shutil.which("agy") or (agy_path and Path(agy_path).is_file()) or native_agy.is_file()):
+        setup_notes.append("[Polyphony setup] Antigravity CLI is not available. Install/authenticate agy before delegating; use agy-doctor for diagnostics.")
+    if os.name == "nt" and importlib.util.find_spec("winpty") is None:
+        setup_notes.append("[Polyphony setup] This Python needs pywinpty for native Windows ConPTY delegation.")
+    update_context = "\n\n".join(filter(None, (*setup_notes, update_context)))
+    if os.environ.get("CLAUDE_PLUGIN_OPTION_CODING_POLICY", "on").lower() not in {"off", "false", "0", "no", "disabled"}:
+        try:
+            policy = json.loads(Path(__file__).with_name("policy-context.json").read_text(encoding="utf-8"))
+            shared_policy = policy["hookSpecificOutput"]["additionalContext"]
+            update_context = "\n\n".join(filter(None, (shared_policy, update_context)))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
 
-    if state.get("mode") in {"strict", "soft"}:
-        _write_state(session_id, state)
-        active_mode = state["mode"]
-        if active_mode == "strict":
-            mode_context = (
-                "[Agy routing] Strict routing is active. Substantive work must be delegated to Antigravity; "
-                "bounded single-file checks, tiny corrections, local orchestration, and host-only capabilities remain available natively."
-            )
-        else:
-            mode_context = (
-                "[Agy routing] Soft routing is active. Substantive work may be completed natively or delegated. "
-                "Delegation reminders are advisory."
-            )
-        context = f"{mode_context}\n\n{update_context}" if update_context else mode_context
-        _emit_context("SessionStart", context)
+    if state.get("mode") not in {"strict", "soft"}:
+        state["mode"] = "soft"
+    _write_state(session_id, state)
+    if state["mode"] == "strict":
+        mode_context = (
+            "[Agy routing] Strict routing is active. Substantive work must be delegated to Antigravity; "
+            "bounded single-file checks, tiny corrections, local orchestration, and host-only capabilities remain available natively."
+        )
     else:
-        state["mode"] = None
-        state["question_presented"] = True
-        _write_state(session_id, state)
-        context = f"{SESSION_START_CONTEXT}\n\n{update_context}" if update_context else SESSION_START_CONTEXT
-        _emit_context("SessionStart", context)
+        mode_context = (
+            "[Agy routing] Soft routing is active. Substantive work may be completed natively or delegated. "
+            "Delegation reminders are advisory."
+        )
+    context = f"{mode_context}\n\n{update_context}" if update_context else mode_context
+    _emit_context("SessionStart", context)
 
 
 def handle_session_end(session_id: str, data: dict | None = None) -> None:
@@ -1806,16 +1863,17 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
     state["warned_categories"] = []
     state["continuation_count"] = 0
     state["user_mode_selection"] = False
+    state["awaiting_user_input"] = False
 
-    current_mode = state.get("mode")
     context_to_emit = ""
 
     mode_target, is_sole = parse_mode_selection_intent(prompt)
+    if re.match(r"^[12](?:\b|$)", str(prompt).strip()) and not state.get("question_presented"):
+        mode_target = None
     if mode_target in {"strict", "soft"}:
         state["mode"] = mode_target
         state["user_mode_selection"] = is_sole
-        state["is_substantive"] = not is_sole
-        _write_persisted_workspace_mode(mode_target, data)
+        persisted = _write_persisted_workspace_mode(mode_target, data)
         if mode_target == "strict":
             context_to_emit = (
                 "[Agy routing] Switched Agy routing mode to strict. "
@@ -1826,18 +1884,19 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
                 "[Agy routing] Switched Agy routing mode to soft. "
                 "Substantive work may be completed natively or delegated. Delegation reminders are advisory."
             )
-    else:
-        if current_mode is None:
-            if state.get("question_presented"):
-                context_to_emit = ""
-            else:
-                context_to_emit = PENDING_PROMPT_CONTEXT
-        elif state["mode"] == "strict" and not _is_control_plane_prompt(prompt):
-            state["is_substantive"] = True
+        if not persisted:
+            context_to_emit = "[Agy routing] Could not persist the requested mode. Do not claim it was saved; check routing-state directory permissions."
 
-    _write_state(session_id, state)
+    saved = _write_state(session_id, state)
+    if mode_target is not None and not saved:
+        context_to_emit = "[Agy routing] Could not save the requested session mode. Do not claim it changed; repair routing-state directory permissions."
 
     contexts = [value for value in (context_to_emit, _quota_context(), _polyphony_update_context()) if value]
+    if (state.get("mode") == "soft" and not context_to_emit
+            and os.environ.get("CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE", "on").lower().strip() not in {"off", "false", "0", "no", "disabled"}
+            and not any(token in str(prompt).lower() for token in ("antigravity", "agy-delegate", "agy-job"))
+            and re.search(r"all files|every file|across the codebase|entire codebase|whole repo|migrat|generate tests|test coverage|exhaustive test|scaffold|boilerplate|deep research|web search|一括|全ファイル|すべてのファイル|網羅|移行|大量|横断|リポジトリ全体", str(prompt), re.I)):
+        contexts.append("[Polyphony] This looks suitable for one scoped Agy worker. Keep its prompt compact and use a digest receipt; delegate when appropriate. This soft-mode reminder is advisory.")
     if contexts:
         _emit_context("UserPromptSubmit", "\n\n".join(contexts))
 
@@ -1857,6 +1916,10 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
         return
 
     if is_control_plane_exempt(tool_name, tool_input):
+        if re.sub(r"[^a-z0-9]", "", tool_name.lower().split(".")[-1]) in {"askuserquestion", "requestuserinput", "requestuserinputasync"}:
+            state["awaiting_user_input"] = True
+            state["question_presented"] = _presents_mode_choices(json.dumps(tool_input, ensure_ascii=False))
+            _write_state(session_id, state)
         if _small_local_helper(tool_name, tool_input):
             state["native_helper_used"] = True
             _write_state(session_id, state)
@@ -1865,6 +1928,7 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
     if is_any_agy_call(tool_name, tool_input):
         if is_work_producing_agy_call(tool_name, tool_input):
             state["is_substantive"] = True
+            state["awaiting_user_input"] = False
             _write_state(session_id, state)
         if tool_name.lower() in SHELL_TOOL_NAMES:
             command = _get_shell_command(tool_input) or ""
@@ -1880,7 +1944,7 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
         return
 
     mode = state.get("mode")
-    effective_strict = (mode is None or mode == "strict")
+    effective_strict = mode == "strict"
     quota_context = _quota_context()
 
     if category == "external":
@@ -1916,18 +1980,15 @@ def handle_pre_tool_use(data: dict, state: dict, session_id: str) -> None:
             _write_state(session_id, state)
             return
         state["is_substantive"] = True
+        state["awaiting_user_input"] = False
         denied = set(state.get("denied_categories") or [])
         denied.add(category)
         state["denied_categories"] = sorted(denied)
         _write_state(session_id, state)
 
-        instruction = (
-            PENDING_DENIAL_INSTRUCTION
-            if mode is None
-            else DENIAL_INSTRUCTIONS.get(
+        instruction = DENIAL_INSTRUCTIONS.get(
                 category,
                 "Strict mode: this substantive operation must be routed through an Agy worker. Native execution is denied.",
-            )
         )
         if quota_context:
             instruction = f"{instruction}\n\n{quota_context}"
@@ -1975,20 +2036,17 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
         selected_mode = _extract_mode_from_answer(data)
         if selected_mode is not None:
             state["mode"] = selected_mode
-            state["question_presented"] = True
+            state["question_presented"] = False
             state["user_mode_selection"] = True
             state["is_substantive"] = False
-            state["agy_attempted"] = False
-            state["agy_success"] = False
-            state["agy_failed"] = False
-            state["agy_pending"] = False
-            state["agy_task_id"] = ""
-            state["last_agy_error"] = ""
             state["denied_categories"] = []
             state["warned_categories"] = []
             state["continuation_count"] = 0
-            _write_state(session_id, state)
-            _write_persisted_workspace_mode(selected_mode, data)
+            persisted = _write_persisted_workspace_mode(selected_mode, data)
+            saved = _write_state(session_id, state)
+            if not persisted or not saved:
+                _emit_context("PostToolUse", "[Agy routing] Mode persistence failed. Do not claim the selection was saved; check routing-state directory permissions.")
+                return
             label = "Always use Agy (strict)" if selected_mode == "strict" else "Use Agy when appropriate (soft)"
             _emit_context(
                 "PostToolUse",
@@ -2068,33 +2126,10 @@ def handle_stop(data: dict, state: dict, session_id: str) -> None:
 
     mode = state.get("mode")
 
-    if mode is None:
-        last_message = _extract_last_message(data)
-        if _presents_mode_choices(last_message):
-            state["question_presented"] = True
-            _write_state(session_id, state)
-            return
-        state["continuation_count"] = continuation_count + 1
-        _write_state(session_id, state)
-        _emit_stop_block(
-            "You must ask the user to select the Agy routing mode before stopping. Clearly present both visible choices:\n"
-            "- Always use Agy (strict)\n"
-            "- Use Agy when appropriate (soft)"
-        )
-        return
-
-    if mode == "soft":
+    if mode != "strict":
         return
 
     # Strict mode
-    if state.get("native_helper_used") and not state.get("agy_attempted") and not state.get("denied_categories"):
-        return
-    if state.get("user_mode_selection") is True or not state.get("is_substantive"):
-        return
-
-    if state.get("agy_success"):
-        return
-
     # An asynchronous launcher acknowledgement is not a failure and must not
     # be mistaken for a completed delegation. Keep the turn open until the
     # host collects a terminal TaskOutput/background result. This check is
@@ -2123,6 +2158,13 @@ def handle_stop(data: dict, state: dict, session_id: str) -> None:
         _emit_stop_block(
             f"Agy delegation failed ({err}). In strict mode, surface the failure or quota choice to the user rather than silently pretending success or continuing natively."
         )
+        return
+
+    if state.get("agy_success") or not state.get("is_substantive"):
+        return
+    if state.get("awaiting_user_input"):
+        return
+    if state.get("native_helper_used") and not state.get("agy_attempted") and not state.get("denied_categories"):
         return
 
     state["continuation_count"] = continuation_count + 1
@@ -2164,6 +2206,7 @@ def main():
         state["warned_categories"] = []
         state["continuation_count"] = 0
         state["user_mode_selection"] = False
+        state["awaiting_user_input"] = False
         _write_state(session_id, state)
 
     if event == "UserPromptSubmit":

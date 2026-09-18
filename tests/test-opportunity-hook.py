@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 
 
@@ -41,6 +44,75 @@ class OpportunityHookTests(unittest.TestCase):
         self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__agent_task", {}))
         self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__agent_message", {}))
         self.assertTrue(module.is_control_plane_exempt("bash", {"command": "polyphony-agent agents"}))
+
+    def test_turkish_mode_switch_and_numeric_nonselection(self):
+        session = str(uuid.uuid4())
+        self.assertEqual(self.set_mode(session, "1"), "")
+        self.set_mode(session, "strict moduna geç")
+        self.assertIn("to soft", self.set_mode(session, "SOFT MODUNA GEÇ"))
+        self.assertIn("to strict", self.set_mode(session, "STRICT MODUNA GEÇ"))
+        self.assertIn("to soft", self.set_mode(session, "LÜTFEN SOFT MODUNA GEÇ"))
+        self.assertIn("to strict", self.set_mode(session, "AGY MODUNU STRİCT YAP"))
+        self.assertIn("to soft", self.set_mode(session, "soft moda geç"))
+        out = self.invoke({"hook_event_name": "PreToolUse", "session_id": session,
+                           "tool_name": "Glob", "tool_input": {"pattern": "**/*"}})
+        self.assertNotIn("permissionDecision", json.loads(out)["hookSpecificOutput"])
+        self.assertIn("to strict", self.set_mode(session, "agy modunu strict yap"))
+        self.set_mode(session, "soft moda geçme")
+        out = self.invoke({"hook_event_name": "PreToolUse", "session_id": session,
+                           "tool_name": "Glob", "tool_input": {"pattern": "**/*"}})
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+        # A restored workspace preference is not an unanswered routing question.
+        restored = str(uuid.uuid4())
+        self.invoke({"hook_event_name": "SessionStart", "session_id": restored, "source": "startup"})
+        self.assertEqual(self.set_mode(restored, "2"), "")
+        out = self.invoke({"hook_event_name": "PreToolUse", "session_id": restored,
+                           "tool_name": "Glob", "tool_input": {"pattern": "**/*"}})
+        self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_strict_conversation_clarification_and_host_controls(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "strict")
+        for prompt in ("naber", "merhaba", "Explain ConPTY", "Polyphony update geldi mi?", "tamam"):
+            self.invoke({"hook_event_name": "UserPromptSubmit", "session_id": session, "prompt": prompt})
+            self.assertEqual(self.invoke({"hook_event_name": "Stop", "session_id": session}), "")
+        for command in (
+            "claude plugin update antigravity@polyphony -y",
+            "codex plugin marketplace upgrade polyphony", "codex plugin add antigravity@polyphony",
+            f'python "{ROOT / "scripts" / "polyphony_update.py"}"',
+            f'python {ROOT / "scripts" / "polyphony_update.py"}',
+        ):
+            self.assertEqual(self.invoke({"hook_event_name": "PreToolUse", "session_id": session,
+                "tool_name": "exec_command", "tool_input": {"cmd": command}}), "")
+        self.invoke({"hook_event_name": "PreToolUse", "session_id": session,
+                     "tool_name": "Glob", "tool_input": {"pattern": "**/*.py"}})
+        self.invoke({"hook_event_name": "PreToolUse", "session_id": session,
+                     "tool_name": "AskUserQuestion", "tool_input": {"questions": []}})
+        self.assertEqual(self.invoke({"hook_event_name": "Stop", "session_id": session}), "")
+        self.invoke({"hook_event_name": "PostToolUseFailure", "session_id": session,
+            "tool_name": "mcp__antigravity__delegate", "tool_input": {"prompt": "work"}, "error": "503"})
+        out = self.invoke({"hook_event_name": "Stop", "session_id": session,
+                           "last_assistant_message": "Which option?"})
+        self.assertEqual(json.loads(out)["decision"], "block")
+        for command in ("codex plugin add untrusted@other", "python arbitrary_update.py", "claude plugin list; git push"):
+            out = self.invoke({"hook_event_name": "PreToolUse", "session_id": session,
+                "tool_name": "exec_command", "tool_input": {"cmd": command}})
+            self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_mode_save_failure_never_claims_success(self):
+        spec = importlib.util.spec_from_file_location("polyphony_mode_failure_test", HOOK)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output = io.StringIO()
+        with patch.object(module, "_write_persisted_workspace_mode", return_value=False), \
+             patch.object(module, "_write_state", return_value=True), \
+             patch.object(module, "_quota_context", return_value=""), \
+             patch.object(module, "_polyphony_update_context", return_value=""), \
+             contextlib.redirect_stdout(output):
+            module.handle_user_prompt_submit({"prompt": "strict"}, module._default_state(), "failure-test", "")
+        self.assertIn("Could not persist", output.getvalue())
+        self.assertNotIn("Switched Agy", output.getvalue())
 
     def invoke(self, payload: dict) -> str:
         completed = subprocess.run(
@@ -78,7 +150,7 @@ class OpportunityHookTests(unittest.TestCase):
 
     # --- 1. SessionStart / Pending Default ---
 
-    def test_session_start_initializes_pending_strict_default(self):
+    def test_session_start_initializes_soft_without_question(self):
         session = str(uuid.uuid4())
         out = self.invoke({
             "hook_event_name": "SessionStart",
@@ -87,8 +159,8 @@ class OpportunityHookTests(unittest.TestCase):
         })
         data = json.loads(out)
         ctx = data["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Always use Agy (strict)", ctx)
-        self.assertIn("Use Agy when appropriate (soft)", ctx)
+        self.assertIn("Soft routing is active", ctx)
+        self.assertNotIn("unanswered", ctx)
 
         # Confirm compact does not wipe state.
         self.set_mode(session, "Use Agy when appropriate (soft)")
@@ -110,7 +182,7 @@ class OpportunityHookTests(unittest.TestCase):
 
     # --- 2. Strict Default Before Answer & Stop Enforcement ---
 
-    def test_strict_default_denies_substantive_tools_before_answer(self):
+    def test_default_soft_allows_native_tools_without_answer(self):
         session = str(uuid.uuid4())
         # Without answering mode, calling Read should be denied
         output = self.invoke({
@@ -122,10 +194,9 @@ class OpportunityHookTests(unittest.TestCase):
         data = json.loads(output)
         hook = data["hookSpecificOutput"]
         self.assertEqual(hook["hookEventName"], "PreToolUse")
-        self.assertEqual(hook.get("permissionDecision"), "deny")
-        self.assertIn("Always use Agy (strict)", hook["permissionDecisionReason"])
+        self.assertNotIn("permissionDecision", hook)
 
-    def test_stop_enforces_exact_mode_question_when_pending(self):
+    def test_stop_never_requires_default_mode_question(self):
         session = str(uuid.uuid4())
 
         # 1. Stop without presenting choices should block
@@ -134,10 +205,7 @@ class OpportunityHookTests(unittest.TestCase):
             "session_id": session,
             "last_assistant_message": "I'm ready to help! What would you like to do?",
         })
-        data = json.loads(blocked)
-        self.assertEqual(data.get("decision"), "block")
-        self.assertIn("Always use Agy (strict)", data.get("reason", ""))
-        self.assertIn("Use Agy when appropriate (soft)", data.get("reason", ""))
+        self.assertEqual(blocked, "")
 
         # 2. Stop with clearly presented canonical choices should allow
         allowed = self.invoke({
@@ -240,7 +308,7 @@ class OpportunityHookTests(unittest.TestCase):
             })
             state_name = hashlib.sha256(pending.encode("utf-8")).hexdigest()[:24] + ".json"
             state = json.loads(Path(self.temp.name, state_name).read_text(encoding="utf-8"))
-            self.assertIsNone(state.get("mode"))
+            self.assertEqual(state.get("mode"), "soft")
 
         session = str(uuid.uuid4())
         self.set_mode(session, "Always use Agy (strict)")
@@ -680,6 +748,10 @@ class OpportunityHookTests(unittest.TestCase):
             "session_id": session,
             "prompt": "Implement authentication",
         })
+        self.invoke({
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "tool_name": "Write", "tool_input": {"file_path": "src/auth.py", "content": "code"},
+        })
 
         # 1. Blocks without Agy work
         b1 = self.invoke({"hook_event_name": "Stop", "session_id": session})
@@ -810,7 +882,7 @@ class OpportunityHookTests(unittest.TestCase):
             "tool_input": {"file_path": "src/app.py"},
         })
         data = json.loads(output)
-        self.assertEqual(data["hookSpecificOutput"].get("permissionDecision"), "deny")
+        self.assertNotIn("permissionDecision", data["hookSpecificOutput"])
 
     # --- 12. Quota Behavior Remains Intact ---
 
@@ -1112,6 +1184,10 @@ class OpportunityHookTests(unittest.TestCase):
             "session_id": session,
             "prompt": "switch to strict and inspect files",
         })
+        self.invoke({
+            "hook_event_name": "PreToolUse", "session_id": session,
+            "tool_name": "Glob", "tool_input": {"pattern": "**/*.py"},
+        })
 
         # Stop must NOT auto-allow because substantive work is pending without completed Agy work
         stop_out = self.invoke({
@@ -1378,7 +1454,7 @@ class OpportunityHookTests(unittest.TestCase):
         self.assertEqual(hook_b.get("permissionDecision"), "deny")
         self.assertIn("selection is pending", hook_b.get("permissionDecisionReason", ""))
 
-    def test_malformed_and_stale_persisted_workspace_state_recovers_and_prompts(self):
+    def test_malformed_persisted_workspace_state_recovers_to_soft(self):
         ws = Path.cwd().resolve()
         norm = os.path.normcase(str(ws))
         ws_safe_id = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
@@ -1395,8 +1471,8 @@ class OpportunityHookTests(unittest.TestCase):
                 })
                 data = json.loads(start_out)
                 ctx = data["hookSpecificOutput"]["additionalContext"]
-                self.assertIn("Always use Agy (strict)", ctx)
-                self.assertIn("Use Agy when appropriate (soft)", ctx)
+                self.assertIn("Soft routing is active", ctx)
+                self.assertNotIn("unanswered", ctx)
 
 
 class HookManifestPortabilityTests(unittest.TestCase):
@@ -1477,9 +1553,19 @@ class HookManifestPortabilityTests(unittest.TestCase):
         self.assertFalse(any("run-opportunity-hook.sh" in cmd or "agy_opportunity_reminder" in cmd for cmd in compact_cmds))
 
         # Claude: fork must run the state Python hook
-        self.assertIn("fork", claude_starts)
-        fork_cmds = claude_starts["fork"]
+        fork_cmds = next(cmds for matcher, cmds in claude_starts.items() if "fork" in matcher.split("|"))
         self.assertTrue(any("run-opportunity-hook.sh" in cmd for cmd in fork_cmds))
+
+        # Codex: SessionStart matcher must be startup|resume|clear (compact and fork excluded)
+        codex_plugin = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        codex_manifest = json.loads((ROOT / codex_plugin["hooks"]).read_text(encoding="utf-8"))
+        codex_starts = codex_manifest["hooks"]["SessionStart"]
+        self.assertEqual(len(codex_starts), 2)
+        codex_matcher = codex_starts[0].get("matcher")
+        self.assertEqual(codex_matcher, "startup|resume|clear|fork")
+        matchers = codex_matcher.split("|")
+        self.assertNotIn("compact", matchers)
+        self.assertIn("fork", matchers)
 
     def test_manifest_interpreter_commands_and_launcher_portability(self):
         # Claude: all python hook invocations must use the portable launcher
@@ -1490,6 +1576,23 @@ class HookManifestPortabilityTests(unittest.TestCase):
                     if "agy_opportunity_reminder" in cmd or "run-opportunity-hook" in cmd:
                         self.assertIn("run-opportunity-hook.sh", cmd)
                         self.assertFalse(cmd.startswith("python "))
+
+        # Both hosts explicitly reference one hook source, without restoring the
+        # default manifest removed in 0.31.61. The compatibility root
+        # alias works in Claude and Codex; native Windows resolves Python itself.
+        plugin = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(plugin["hooks"], "./claude/hooks/hooks.json")
+        self.assertFalse((ROOT / "hooks/hooks.json").exists())
+        codex_plugin = json.loads((ROOT / ".codex-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(codex_plugin["hooks"], plugin["hooks"])
+        for event_name, entries in self.claude_manifest["hooks"].items():
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    cmd_win = h.get("commandWindows", "")
+                    self.assertIn("${CLAUDE_PLUGIN_ROOT}", cmd)
+                    self.assertIn("run-opportunity-hook.ps1", cmd_win)
+                    self.assertIn("${CLAUDE_PLUGIN_ROOT}", cmd_win)
 
         # Launcher file must exist, be executable, and resolve python interpreters in order
         launcher = ROOT / "hooks" / "run-opportunity-hook.sh"
@@ -1503,6 +1606,8 @@ class HookManifestPortabilityTests(unittest.TestCase):
         self.assertTrue(pos_bridge != -1 and pos_py3 != -1 and pos_py_3 != -1 and pos_py != -1)
         self.assertTrue(pos_bridge < pos_py3 < pos_py_3 < pos_py)
         self.assertIn("exec", content)
+        self.assertIn('run-opportunity-hook.ps1" "$@"', content)
+        self.assertIn("PYTHONUTF8=1", content)
 
         # Test launcher executes agy_opportunity_reminder.py correctly when invoked via bash
         if not self.bash_bin:
@@ -1522,6 +1627,22 @@ class HookManifestPortabilityTests(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0)
         self.assertEqual(res.stdout.strip(), "")
+
+    @unittest.skipUnless(os.name == "nt", "Native Windows launcher")
+    def test_native_windows_launcher_carries_utf8_payload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = os.environ.copy()
+            env.update(AGY_BRIDGE_PYTHON=sys.executable, AGY_ROUTING_STATE_DIR=temp,
+                       AGY_QUOTA_STATE_DIR=temp, POLYPHONY_UPDATE_CHECK="off")
+            command = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                       str(ROOT / "hooks" / "run-opportunity-hook.ps1")]
+            session = str(uuid.uuid4())
+            result = subprocess.run(command, input=json.dumps({
+                "hook_event_name": "UserPromptSubmit", "session_id": session,
+                "prompt": "soft moda geç",
+            }, ensure_ascii=False), env=env, text=True, encoding="utf-8", capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Switched Agy routing mode to soft", result.stdout)
 
     def test_nudge_delegation_silence_on_missing_or_unusable_session(self):
         if not self.bash_bin:
