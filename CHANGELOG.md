@@ -3,6 +3,25 @@
 All notable changes to **Polyphony**. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions are in `.claude-plugin/plugin.json`.
 
+## 0.31.61 — Dead hooks manifest removal and CI cleanup
+
+- Removed `hooks/hooks.json`. Antigravity reads only `<plugin>/hooks.json`, never the
+  nested path; it does not substitute `${PLUGIN_ROOT}`; and it has no SessionStart,
+  SessionEnd or PostToolUseFailure event, so the manifest could never bind there. Codex
+  declares no hooks key at all. The only host that loaded it was Claude Code, which
+  auto-discovers a plugin-root `hooks/hooks.json` alongside the declared
+  `claude/hooks/hooks.json` — there `${PLUGIN_ROOT}` expanded to an empty string and every
+  tool call failed, blocking the session.
+- Dropped the file from the CI and test JSON-validity lists and removed the two portability
+  assertions that compared it against `claude/hooks/hooks.json`. The launcher and the hook
+  scripts under `hooks/` are unchanged.
+- Removed the `quorum-review` workflow. It has never completed successfully: it needs a
+  Google Cloud Workload Identity provider, a GitHub App private key, a GCP project and
+  Claude enabled in Vertex AI Model Garden, and none of those secrets exist on the
+  repository, so every run died on its first step.
+- Scoped the CI `push` trigger to `master`. It had no branch filter, so a branch push and
+  the `pull_request` event each started the same job on the same commit.
+
 ## 0.31.60 — Persistent Subagent Communication & Reliability
 
 ### Persistent subagent communication
