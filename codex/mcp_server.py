@@ -709,7 +709,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.60"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.61"},
             },
         }
     if method == "notifications/initialized":
