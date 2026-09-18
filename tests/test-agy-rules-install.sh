@@ -6,6 +6,12 @@
 # GEMINI_HOME at a temp dir. A test that forgot to would silently edit the developer's
 # own agy config and still pass.
 #
+# These cases assert what is ON DISK, which is all an offline test can do. Whether agy
+# then actually loads the rules is a separate question, and getting it wrong is how
+# this feature first shipped dead: rules were installed without the plugin.json
+# manifest agy needs, every check here passed, and no worker ever saw a rule.
+# tests/test-agy-rules-live.sh answers that question against a real agy.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,21 +49,57 @@ ok "rule is $words words (< 800)"
 # --- fresh install -----------------------------------------------------------
 H="$(fresh_home)"
 out="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "installer exited non-zero"
-DEST="$H/.gemini/config/plugins/polyphony/rules/coding-quality.md"
+PLUGIN_DIR="$H/.gemini/config/plugins/polyphony"
+DEST="$PLUGIN_DIR/rules/coding-quality.md"
 [ -f "$DEST" ] || fail "rule was not installed to $DEST"
 cmp -s "$RULES" "$DEST" || fail "installed rule differs from source"
 printf '%s' "$out" | grep -q 'installed 1' || fail "installer did not report the install: $out"
 ok "fresh install copies the rule and reports it"
 
+# --- the manifest agy needs --------------------------------------------------
+# Measured on agy 1.2.6: without plugin.json beside rules/, agy does not treat the
+# directory as a plugin and never reads the rules — no error, no warning. The rule
+# file being present proves nothing on its own, which is what this guards.
+MANIFEST="$PLUGIN_DIR/plugin.json"
+[ -f "$MANIFEST" ] || fail "no plugin.json at $MANIFEST — agy will not read rules/"
+grep -q '"name": "polyphony"' "$MANIFEST" || fail "plugin.json does not name the plugin: $(cat "$MANIFEST")"
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+else PY=""; fi
+if [ -n "$PY" ]; then
+  "$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["name"]=="polyphony", d' "$MANIFEST" \
+    || fail "plugin.json is not valid JSON naming polyphony"
+fi
+printf '%s' "$out" | grep -q 'plugin.json' || fail "manifest write was not reported: $out"
+ok "fresh install writes the plugin.json agy needs, and reports it"
+
+# The manifest belongs beside rules/, not inside it: agy looks for it at the plugin
+# root, and a copy under rules/ would also be parsed as a rule.
+[ ! -f "$PLUGIN_DIR/rules/plugin.json" ] || fail "plugin.json was written inside rules/"
+ok "manifest sits at the plugin root, not inside rules/"
+
 # --- idempotence -------------------------------------------------------------
 # A SessionStart hook runs on every session; re-copying each time would churn the
 # disk and clobber a user's local edits on every prompt.
 before="$(stat -c %Y "$DEST" 2>/dev/null || stat -f %m "$DEST")"
+m_before="$(stat -c %Y "$MANIFEST" 2>/dev/null || stat -f %m "$MANIFEST")"
 out2="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "second run exited non-zero"
 [ -z "$out2" ] || fail "unchanged rule should install silently, got: $out2"
 after="$(stat -c %Y "$DEST" 2>/dev/null || stat -f %m "$DEST")"
+m_after="$(stat -c %Y "$MANIFEST" 2>/dev/null || stat -f %m "$MANIFEST")"
 [ "$before" = "$after" ] || fail "unchanged rule was rewritten"
-ok "unchanged rule is not rewritten and prints nothing"
+[ "$m_before" = "$m_after" ] || fail "unchanged manifest was rewritten"
+ok "unchanged rule and manifest are not rewritten, and print nothing"
+
+# --- upgrading from a version that shipped without the manifest --------------
+# The rules are already installed and identical, so the copy loop does nothing. If
+# the manifest were only written alongside a rule copy, that machine would stay
+# broken forever. This is the exact shape of the bug this test was added for.
+rm -f "$MANIFEST"
+out_up="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "upgrade run exited non-zero"
+[ -f "$MANIFEST" ] || fail "missing manifest was not restored when the rules were unchanged"
+printf '%s' "$out_up" | grep -q 'plugin.json' || fail "manifest repair was not reported: $out_up"
+ok "a missing manifest is restored even when no rule changed"
 
 # --- content change reinstalls ----------------------------------------------
 printf 'local edit\n' >> "$DEST"
@@ -66,13 +108,20 @@ cmp -s "$RULES" "$DEST" || fail "changed rule was not restored from source"
 printf '%s' "$out3" | grep -q 'installed 1' || fail "changed rule reinstall was not reported"
 ok "a changed rule is restored from source"
 
+# A user who edited the manifest gets it put back: agy reads it, so a broken one
+# disables the rules just as surely as a missing one.
+printf 'not json\n' > "$MANIFEST"
+out4="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "manifest repair run exited non-zero"
+grep -q '"name": "polyphony"' "$MANIFEST" || fail "corrupted manifest was not restored"
+ok "a corrupted manifest is restored from source"
+
 # --- no agy config tree ------------------------------------------------------
 # agy was never run on this machine. Creating the tree ourselves would litter the
 # disk for someone who does not use agy at all.
 H2="$TMPROOT/noagy"; mkdir -p "$H2"
-out4="$(GEMINI_HOME="$H2/.gemini" HOME="$H2" bash "$INSTALLER" 2>&1)" || fail "missing-config run exited non-zero"
+out5="$(GEMINI_HOME="$H2/.gemini" HOME="$H2" bash "$INSTALLER" 2>&1)" || fail "missing-config run exited non-zero"
 [ ! -d "$H2/.gemini" ] || fail "installer created a Gemini home that did not exist"
-[ -z "$out4" ] || fail "missing agy config should be silent, got: $out4"
+[ -z "$out5" ] || fail "missing agy config should be silent, got: $out5"
 ok "no agy config tree: does nothing, silently"
 
 # --- unwritable destination --------------------------------------------------
@@ -84,15 +133,39 @@ chmod 500 "$H3/.gemini/config/plugins" 2>/dev/null || true
 # and this case would assert nothing. Probe first and skip rather than pass falsely.
 if [ "$(id -u)" != "0" ] && ! touch "$H3/.gemini/config/plugins/.probe" 2>/dev/null; then
   set +e
-  out5="$(GEMINI_HOME="$H3/.gemini" HOME="$H3" bash "$INSTALLER" 2>&1)"; rc=$?
+  out6="$(GEMINI_HOME="$H3/.gemini" HOME="$H3" bash "$INSTALLER" 2>&1)"; rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "unwritable destination must still exit 0, got $rc"
-  printf '%s' "$out5" | grep -qi 'not installed' || fail "unwritable destination did not warn: $out5"
+  printf '%s' "$out6" | grep -qi 'not installed' || fail "unwritable destination did not warn: $out6"
   ok "unwritable destination warns and still exits 0"
 else
   rm -f "$H3/.gemini/config/plugins/.probe" 2>/dev/null || true
   printf '  skip unwritable-destination case (permissions not enforced here)\n'
 fi
 chmod 700 "$H3/.gemini/config/plugins" 2>/dev/null || true
+
+# --- the two installers must agree -------------------------------------------
+# Windows sessions run the .ps1 and everyone else runs the .sh against the same
+# Gemini home. If they disagree on a single byte of the manifest they rewrite each
+# other's file on every session start.
+PS_EXE=""
+for c in pwsh powershell.exe powershell; do
+  command -v "$c" >/dev/null 2>&1 && { PS_EXE="$c"; break; }
+done
+if [ -n "$PS_EXE" ]; then
+  H4="$(fresh_home)"
+  WIN_HOME="$H4"
+  command -v cygpath >/dev/null 2>&1 && WIN_HOME="$(cygpath -w "$H4")"
+  GEMINI_HOME="$WIN_HOME\\.gemini" "$PS_EXE" -NoProfile -ExecutionPolicy Bypass \
+    -File "$ROOT/hooks/install-agy-rules.ps1" >/dev/null 2>&1 \
+    || fail "powershell installer exited non-zero"
+  PS_MANIFEST="$H4/.gemini/config/plugins/polyphony/plugin.json"
+  [ -f "$PS_MANIFEST" ] || fail "powershell installer wrote no manifest to $PS_MANIFEST"
+  cmp -s "$MANIFEST" "$PS_MANIFEST" \
+    || fail "sh and ps1 manifests differ:$(printf '\n')$(diff "$MANIFEST" "$PS_MANIFEST" || true)"
+  ok "sh and ps1 write a byte-identical manifest"
+else
+  printf '  skip installer-parity case (no powershell here)\n'
+fi
 
 printf '\nagy rules installer: %d checks passed\n' "$PASS"

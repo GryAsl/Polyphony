@@ -10,10 +10,19 @@
 # ~460-word standing preamble would eat most of that budget on every call. Rules are
 # loaded by agy itself, cost the caller nothing, and apply to sessions we never see.
 #
-# Rules are read from <plugin>/rules/ and — verified against agy 1.2.3 — load WITHOUT
-# the plugin being registered in ~/.gemini/config/config.json, so this never edits the
-# user's config. Dropping the directory is enough. Frontmatter MUST carry
-# `trigger: always_on` or agy ignores the file silently: no error, no warning.
+# WHAT agy needs, measured on 1.2.6 by comparing prompt token counts across runs:
+#
+#   * A plugin.json manifest beside rules/. Without it agy does not treat the
+#     directory as a plugin and never reads rules/ — no error, no warning, and the
+#     rules ship dead. `name` and `description` are enough; no version is needed.
+#   * Frontmatter carrying `trigger: always_on` in each rule, or agy ignores that
+#     file, equally silently.
+#
+# Registering the plugin in ~/.gemini/config/config.json is NOT needed — the manifest
+# alone is enough — so this never edits the user's config.
+#
+# GEMINI_HOME relocates where WE write. agy itself was measured to ignore it and to
+# always read $HOME/.gemini, so honouring it here serves the tests, not relocation.
 #
 # Never fails the session. Every failure path warns on stderr and exits 0.
 #
@@ -24,7 +33,8 @@ SRC_DIR="$HERE/../agy/rules"
 
 # Honour a relocated Gemini home the same way agy does.
 GEMINI_ROOT="${GEMINI_HOME:-$HOME/.gemini}"
-DEST_DIR="$GEMINI_ROOT/config/plugins/polyphony/rules"
+PLUGIN_DIR="$GEMINI_ROOT/config/plugins/polyphony"
+DEST_DIR="$PLUGIN_DIR/rules"
 
 [ -d "$SRC_DIR" ] || exit 0
 
@@ -35,6 +45,23 @@ DEST_DIR="$GEMINI_ROOT/config/plugins/polyphony/rules"
 if ! mkdir -p "$DEST_DIR" 2>/dev/null; then
   echo "[polyphony] could not create $DEST_DIR — agy engineering rules not installed" >&2
   exit 0
+fi
+
+# Kept byte-for-byte stable: it is compared against what is already on disk, and a
+# manifest that differed per run would rewrite the file on every session start.
+MANIFEST='{
+  "name": "polyphony",
+  "description": "Polyphony engineering rules for agy workers."
+}'
+
+manifest_path="$PLUGIN_DIR/plugin.json"
+if [ ! -f "$manifest_path" ] || [ "$(cat "$manifest_path" 2>/dev/null)" != "$MANIFEST" ]; then
+  if printf '%s\n' "$MANIFEST" > "$manifest_path" 2>/dev/null; then
+    echo "[polyphony] wrote $manifest_path — agy does not read rules/ without it" >&2
+  else
+    echo "[polyphony] could not write $manifest_path — agy engineering rules not installed" >&2
+    exit 0
+  fi
 fi
 
 installed=0
