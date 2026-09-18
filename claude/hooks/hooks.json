@@ -9,6 +9,12 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-opportunity-hook.sh\"",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/hooks/run-opportunity-hook.ps1\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/install-agy-rules.sh\"",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}/hooks/install-agy-rules.ps1\"",
+            "timeout": 10
           }
         ]
       },

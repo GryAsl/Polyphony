@@ -66,6 +66,8 @@ run "persistent ownership safeguard" "${PY[@]}" "$ROOT/tests/test-runtime.py" \
   RuntimeTests.test_fresh_agent_and_workspace_isolation
 fi
 
+run "agy rules installer" "$ROOT/tests/test-agy-rules-install.sh"
+
 run "manifest JSON" "${PY[@]}" - "$ROOT" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])

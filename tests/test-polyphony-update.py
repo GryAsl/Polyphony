@@ -33,6 +33,7 @@ class UpdateCheckerTests(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "POLYPHONY_UPDATE_STATE_FILE": str(Path(self.temp.name) / "state.json"),
             "POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS": "86400",
+            "POLYPHONY_UPDATE_CHECK": "on",
         }, clear=False)
         self.env.start()
 

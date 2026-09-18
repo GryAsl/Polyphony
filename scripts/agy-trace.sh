@@ -13,11 +13,8 @@
 # "never trust agy's self-reported GREEN" rule actually checkable.
 #
 # WHAT IS RECORDED: one typed step per action — RUN_COMMAND (with exit_code and
-# the command's OUTPUT), CODE_ACTION, VIEW_FILE, LIST_DIRECTORY, PLANNER_RESPONSE.
-# WHAT IS NOT: the command STRING itself. It appears in neither transcript.jsonl,
-# transcript_full.jsonl, nor ~/.gemini/antigravity-cli/log/cli-*.log. You can see
-# THAT a command ran, its exit code and its output — you cannot reconstruct it.
-# To attribute a filesystem change, diff the tree; this tool cannot tell you.
+# the command's OUTPUT), CODE_ACTION, VIEW_FILE, LIST_DIRECTORY, PLANNER_RESPONSE,
+# and the command strings under tool_calls[].args.CommandLine.
 #
 # Usage:
 #   agy-trace.sh <conversationId | path/to/transcript.jsonl>   Pretty-print the steps
@@ -98,7 +95,24 @@ audit() { # $1 = transcript path
   echo "# audit $1"
   "${PY[@]}" - "$1" <<'PY'
 import json, sys, collections
-counts, failures, steps = collections.Counter(), [], 0
+counts, failures, commands, steps = collections.Counter(), [], [], 0
+
+
+def commands_in(step):
+    for call in step.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        args = call.get("args")
+        if not isinstance(args, dict):
+            continue
+        cmd = args.get("CommandLine")
+        if not isinstance(cmd, str):
+            continue
+        cmd = " ".join(cmd.split()).strip('"').replace('\\"', '"')
+        if cmd:
+            yield cmd
+
+
 with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
     for line in fh:
         line = line.strip()
@@ -112,6 +126,7 @@ with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
         steps += 1
         counts[str(d.get("type", "?"))] += 1
         # exit_code is absent on non-command steps; 0 is success, anything else is not.
+        commands.extend(commands_in(d))
         rc = d.get("exit_code")
         if isinstance(rc, int) and rc != 0:
             out = " ".join(str(d.get("content") or "").split())
@@ -125,7 +140,14 @@ if failures:
         print(f"    [step {idx}] exit={rc}  {out}")
 else:
     print("  no non-zero exit codes")
-print("  NOTE: command strings are not recorded by agy — exit codes and output only.")
+if commands:
+    print(f"  COMMANDS RUN ({len(commands)}):")
+    for cmd in commands[:40]:
+        print(f"    {cmd[:160]}")
+    if len(commands) > 40:
+        print(f"    (+{len(commands) - 40} more — use --raw for all of them)")
+else:
+    print("  no commands recorded (this run ran none, or wrote them in another shape)")
 PY
 }
 

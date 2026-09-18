@@ -1103,7 +1103,7 @@ def is_work_producing_agy_call(tool_name: str, tool_input: dict) -> bool:
         }:
             return True
         if wrapper == "agy-job":
-            return len(tokens) > 1 and tokens[1].lower() == "result"
+            return len(tokens) > 1 and tokens[1].lower() in {"start", "result"}
         if wrapper == "agy":
             return len(tokens) > 1 and tokens[1].lower() in {
                 "delegate", "scout", "review", "media", "migrate", "cost-compare",
@@ -1327,6 +1327,35 @@ def _background_task_id(*values: any) -> str:
     return ""
 
 
+def _agy_job_start_command(tool_input: any) -> bool:
+    if not isinstance(tool_input, dict):
+        return False
+    cmd = _get_shell_command(tool_input)
+    if not cmd:
+        return False
+    parsed = parse_single_agy_shell_command(cmd)
+    if parsed is None:
+        parsed = _agy_compound_command(cmd)
+    if parsed is None:
+        return False
+    wrapper, tokens = parsed
+    return wrapper == "agy-job" and len(tokens) > 1 and tokens[1].lower() == "start"
+
+
+def _agy_job_started_id(response: any) -> str:
+    obj = _response_dict(response)
+    text = ""
+    if isinstance(obj, dict):
+        text = str(obj.get("stdout") or obj.get("output") or "")
+    elif isinstance(response, str):
+        text = response
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.split()[-1]
+    return ""
+
+
 def _background_result_is_pending(data: dict, tool_input: dict, response: any) -> bool:
     """Return true only for explicit host signals that work is still running.
 
@@ -1335,6 +1364,8 @@ def _background_result_is_pending(data: dict, tool_input: dict, response: any) -
     result is asynchronous would weaken strict routing and hide failures.
     """
     response_obj = _response_dict(response)
+    if _agy_job_start_command(tool_input):
+        return True
     # `run_in_background` belongs to the launcher invocation. Its shell
     # command can legitimately report exit 0/completed while the spawned Agy
     # worker is still running, so this signal takes precedence over that
@@ -2097,7 +2128,11 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
     else:
         if _background_result_is_pending(data, tool_input, response):
             state["agy_pending"] = True
-            state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
+            state["agy_task_id"] = (
+                _background_task_id(data, tool_input, response)
+                or _agy_job_started_id(response)
+                or state.get("agy_task_id", "")
+            )
             state["agy_success"] = False
             state["agy_failed"] = False
             state["last_agy_error"] = ""

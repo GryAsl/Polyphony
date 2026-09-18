@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.31.63 — Engineering rules for every agy worker
+
+- Ship `agy/rules/coding-quality.md` and install it into `~/.gemini/config/plugins/polyphony/rules/`
+  from a SessionStart hook, so every `agy` worker starts with the same standards for reading
+  surrounding code before writing, never inventing APIs, verifying by running the command and
+  quoting the output before claiming success, and reporting what was left unverified.
+- Install as a file rather than prompt text. `scripts/agy-delegate.sh` hard-fails a prompt of
+  800 words or more and states that files and stdin do not bypass that limit, so a standing
+  preamble would consume most of the per-call budget; rules are loaded by agy itself, cost the
+  caller nothing, and also apply to agy sessions Polyphony never invokes.
+- Write the `plugin.json` manifest agy needs beside `rules/`. Measured on agy 1.2.6 by comparing
+  prompt token counts: without the manifest agy does not treat the directory as a plugin and never
+  reads the rules — no error, no warning — so the rules shipped dead while every check passed.
+  Restoring a missing or corrupted manifest is not tied to a rule copy, so a machine that installed
+  the earlier, broken layout is repaired on its next session.
+- Registering the plugin in `~/.gemini/config/config.json` is not needed, so the installer still
+  never edits the user's config. Frontmatter must carry `trigger: always_on`; agy ignores a rule
+  without it silently, so a test asserts it.
+- Add `tests/test-agy-rules-live.sh`: an opt-in check (`POLYPHONY_LIVE_AGY=1`) that asks a real agy
+  worker to quote the installed rule. The offline test can only assert what is on disk, which is
+  exactly how the missing manifest went unnoticed.
+- The installer is idempotent, copies only on first install or a real content change, does
+  nothing when no agy config tree exists, and warns without ever failing the session. The bash and
+  PowerShell installers write a byte-identical manifest, asserted by a test, so they cannot rewrite
+  each other's file every session.
+- Treat `agy-job start` as the delegation it is. It launches a worker and returns the new job id
+  immediately, but the hook classified only `agy-job result` as work-producing, so a turn that
+  started a background job left no pending worker: `Stop` allowed the turn to end while the job was
+  still running, with no result collected. Starting a job now marks the turn substantive and the
+  worker pending, and the `Stop` gate names the job id to collect. `list`, `status` and `cancel`
+  stay control plane.
+- Correct three `test-opportunity-hook.py` expectations that asserted behaviour the product had
+  never had or no longer has, and so could not pass: a bare `"2"` counted as a soft selection
+  although 0.31.62 stopped treating bare numerals as answers once the startup routing question was
+  removed; workspace isolation was probed through that removed question instead of through the soft
+  default, and now also asserts the configured workspace stayed strict; and the `agy-job start`
+  case used an invented `Job started: ...` output where the wrapper prints only the bare job id.
+- `scripts/agy-trace.sh --audit` now lists the commands a worker ran. It previously stated that agy
+  does not record them; agy records them under `tool_calls[].args.CommandLine`, and the incorrect
+  note hid the audit's most useful evidence.
+
 ## 0.31.62 — Portable routing fixes and contributor-friendly CI
 
 - Preserve every 0.31.61 removal and CI trigger fix. Explicitly bind both hosts to
