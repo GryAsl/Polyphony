@@ -1489,6 +1489,24 @@ class OpportunityHookTests(unittest.TestCase):
 
 
 class HookManifestPortabilityTests(unittest.TestCase):
+    def test_shipped_shell_scripts_carry_the_executable_bit(self):
+        listing = subprocess.run(
+            ["git", "ls-files", "-s", "--", "*.sh"],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        if listing.returncode != 0 or not listing.stdout.strip():
+            self.skipTest("not a git checkout")
+        offenders = []
+        for line in listing.stdout.splitlines():
+            meta, _, path = line.partition("\t")
+            if meta.split()[0] != "100755":
+                offenders.append(f"{path} is {meta.split()[0]}")
+        self.assertEqual(
+            offenders, [],
+            "hooks.json and run-tests.sh execute these directly; a non-executable "
+            "mode passes on Windows and fails everywhere else: " + ", ".join(offenders),
+        )
+
     @classmethod
     def _find_bash(cls) -> str | None:
         which_bash = shutil.which("bash")
