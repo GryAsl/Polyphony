@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -1591,8 +1592,17 @@ class HookManifestPortabilityTests(unittest.TestCase):
                     cmd = h.get("command", "")
                     cmd_win = h.get("commandWindows", "")
                     self.assertIn("${CLAUDE_PLUGIN_ROOT}", cmd)
-                    self.assertIn("run-opportunity-hook.ps1", cmd_win)
                     self.assertIn("${CLAUDE_PLUGIN_ROOT}", cmd_win)
+                    # Every hook needs a native-Windows counterpart, but not one
+                    # specific launcher: asserting a filename here would fail any
+                    # new hook that ships its own .ps1. Require a .ps1 under the
+                    # plugin root, and that the file it names actually exists.
+                    win_script = re.search(r"\$\{CLAUDE_PLUGIN_ROOT\}/(\S+\.ps1)", cmd_win)
+                    self.assertIsNotNone(
+                        win_script, f"{event_name}: commandWindows names no .ps1: {cmd_win}")
+                    self.assertTrue(
+                        (ROOT / win_script.group(1)).is_file(),
+                        f"{event_name}: {win_script.group(1)} does not exist")
 
         # Launcher file must exist, be executable, and resolve python interpreters in order
         launcher = ROOT / "hooks" / "run-opportunity-hook.sh"

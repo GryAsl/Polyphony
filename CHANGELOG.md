@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.31.63 — Engineering rules for every agy worker
+
+- Ship `agy/rules/coding-quality.md` and install it into `~/.gemini/config/plugins/polyphony/rules/`
+  from a SessionStart hook, so every `agy` worker starts with the same standards for reading
+  surrounding code before writing, never inventing APIs, verifying by running the command and
+  quoting the output before claiming success, and reporting what was left unverified.
+- Install as a file rather than prompt text. `scripts/agy-delegate.sh` hard-fails a prompt of
+  800 words or more and states that files and stdin do not bypass that limit, so a standing
+  preamble would consume most of the per-call budget; rules are loaded by agy itself, cost the
+  caller nothing, and also apply to agy sessions Polyphony never invokes.
+- Verified against agy 1.2.3 that `<plugin>/rules/` loads without the plugin being registered in
+  `~/.gemini/config/config.json`, so the installer never edits the user's config. Frontmatter
+  must carry `trigger: always_on`; agy ignores a rule without it silently, so a test asserts it.
+- The installer is idempotent, copies only on first install or a real content change, does
+  nothing when no agy config tree exists, and warns without ever failing the session.
+
 ## 0.31.62 — Portable routing fixes and contributor-friendly CI
 
 - Preserve every 0.31.61 removal and CI trigger fix. Explicitly bind both hosts to
