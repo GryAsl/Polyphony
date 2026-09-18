@@ -601,6 +601,50 @@ class OpportunityHookTests(unittest.TestCase):
         stop_allowed4 = self.invoke({"hook_event_name": "Stop", "session_id": session4})
         self.assertEqual(stop_allowed4, "")
 
+        # 6. Codex MCP job start has the same pending semantics as shell agy-job start.
+        session5 = str(uuid.uuid4())
+        self.set_mode(session5, "Always use Agy (strict)")
+        self.invoke({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session5,
+            "prompt": "Fix auth.py",
+        })
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session5,
+            "tool_name": "mcp__antigravity__job",
+            "tool_input": {"action": "start", "prompt": "fix bug"},
+            "tool_response": {
+                "exit_code": 0,
+                "structuredContent": {"job_id": "mcp-job-123"},
+            },
+        })
+        mcp_pending = json.loads(self.invoke({"hook_event_name": "Stop", "session_id": session5}))
+        self.assertEqual(mcp_pending.get("decision"), "block")
+        self.assertIn("mcp-job-123", mcp_pending.get("reason", ""))
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session5,
+            "tool_name": "mcp__antigravity__job",
+            "tool_input": {"action": "result", "job_id": "mcp-job-123"},
+            "tool_response": {"exit_code": 0, "stdout": "Completed MCP job result"},
+        })
+        self.assertEqual(self.invoke({"hook_event_name": "Stop", "session_id": session5}), "")
+
+        # A failed MCP launch is a failure, never an indefinitely pending worker.
+        session6 = str(uuid.uuid4())
+        self.set_mode(session6, "Always use Agy (strict)")
+        self.invoke({
+            "hook_event_name": "PostToolUse",
+            "session_id": session6,
+            "tool_name": "mcp__antigravity__job",
+            "tool_input": {"action": "start", "prompt": "fail to launch"},
+            "tool_response": {"exit_code": 19, "stderr": "CAPACITY_UNAVAILABLE"},
+        })
+        mcp_failed = json.loads(self.invoke({"hook_event_name": "Stop", "session_id": session6}))
+        self.assertEqual(mcp_failed.get("decision"), "block")
+        self.assertNotIn("still running", mcp_failed.get("reason", ""))
+
     def test_host_background_agy_result_is_pending_until_task_output(self):
         """An async launcher acknowledgement must not become an empty-output failure."""
         session = str(uuid.uuid4())

@@ -41,8 +41,8 @@ ok "fresh install copies the rule and reports it"
 MANIFEST="$PLUGIN_DIR/plugin.json"
 [ -f "$MANIFEST" ] || fail "no plugin.json at $MANIFEST — agy will not read rules/"
 grep -q '"name": "polyphony"' "$MANIFEST" || fail "plugin.json does not name the plugin: $(cat "$MANIFEST")"
-if command -v python3 >/dev/null 2>&1; then PY=python3
-elif command -v python >/dev/null 2>&1; then PY=python
+if command -v python3 >/dev/null 2>&1 && python3 -c 'exit(0)' >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1 && python -c 'exit(0)' >/dev/null 2>&1; then PY=python
 else PY=""; fi
 if [ -n "$PY" ]; then
   "$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["name"]=="polyphony", d' "$MANIFEST" \
@@ -109,9 +109,12 @@ for c in pwsh powershell.exe powershell; do
 done
 if [ -n "$PS_EXE" ]; then
   H4="$(fresh_home)"
-  WIN_HOME="$H4"
-  command -v cygpath >/dev/null 2>&1 && WIN_HOME="$(cygpath -w "$H4")"
-  GEMINI_HOME="$WIN_HOME\\.gemini" "$PS_EXE" -NoProfile -ExecutionPolicy Bypass \
+  if command -v cygpath >/dev/null 2>&1; then
+    PS_GEMINI_HOME="$(cygpath -w "$H4")\\.gemini"
+  else
+    PS_GEMINI_HOME="$H4/.gemini"
+  fi
+  GEMINI_HOME="$PS_GEMINI_HOME" "$PS_EXE" -NoProfile -ExecutionPolicy Bypass \
     -File "$ROOT/hooks/install-agy-rules.ps1" >/dev/null 2>&1 \
     || fail "powershell installer exited non-zero"
   PS_MANIFEST="$H4/.gemini/config/plugins/polyphony/plugin.json"

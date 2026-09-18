@@ -1084,7 +1084,7 @@ def is_work_producing_agy_call(tool_name: str, tool_input: dict) -> bool:
         }:
             return True
         if lowered_name == "mcp__antigravity__job":
-            return tool_input.get("action") == "result"
+            return tool_input.get("action") in {"start", "result"}
         return False
 
     if lowered_name in SHELL_TOOL_NAMES:
@@ -1343,17 +1343,39 @@ def _agy_job_start_command(tool_input: any) -> bool:
 
 
 def _agy_job_started_id(response: any) -> str:
-    obj = _response_dict(response)
-    text = ""
-    if isinstance(obj, dict):
+    sources = _nested_response_dicts(_response_dict(response) or response)
+    for obj in sources or ():
         text = str(obj.get("stdout") or obj.get("output") or "")
-    elif isinstance(response, str):
-        text = response
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped.split()[-1]
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped.split()[-1]
+        for key in ("job_id", "jobId"):
+            value = obj.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    if isinstance(response, str):
+        for line in response.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped.split()[-1]
     return ""
+
+
+def _mcp_job_start(data: dict, tool_input: dict) -> bool:
+    tool_name = str(data.get("tool_name") or data.get("toolName") or data.get("name") or "").lower()
+    return tool_name == "mcp__antigravity__job" and tool_input.get("action") == "start"
+
+
+def _mcp_job_start_succeeded(data: dict, tool_input: dict, response: any) -> bool:
+    """Recognize a real MCP job launch without turning launch failures into pending work."""
+    if not _mcp_job_start(data, tool_input) or response is None:
+        return False
+    response_obj = _response_dict(response) or response
+    for obj in _nested_response_dicts(response_obj) or ():
+        if _check_error_flag(obj) or _check_exit_code(obj):
+            return False
+    return bool(_background_task_id(data, response) or _agy_job_started_id(response))
 
 
 def _background_result_is_pending(data: dict, tool_input: dict, response: any) -> bool:
@@ -1365,6 +1387,8 @@ def _background_result_is_pending(data: dict, tool_input: dict, response: any) -
     """
     response_obj = _response_dict(response)
     if _agy_job_start_command(tool_input):
+        return True
+    if _mcp_job_start_succeeded(data, tool_input, response):
         return True
     # `run_in_background` belongs to the launcher invocation. Its shell
     # command can legitimately report exit 0/completed while the spawned Agy

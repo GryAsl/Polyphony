@@ -1,13 +1,18 @@
 $ErrorActionPreference = 'Continue'
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
-$srcDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'agy/rules'
+$onWindows = [System.IO.Path]::DirectorySeparatorChar -eq '\'
+
+$srcDir = Join-Path (Split-Path -Parent $PSScriptRoot) (Join-Path 'agy' 'rules')
 if (-not (Test-Path -LiteralPath $srcDir)) { exit 0 }
 
 $geminiRoot = if ($env:GEMINI_HOME) { $env:GEMINI_HOME } else { Join-Path $HOME '.gemini' }
+if (-not $onWindows -and $geminiRoot) {
+    $geminiRoot = $geminiRoot -replace '\\', '/'
+}
 if (-not (Test-Path -LiteralPath (Join-Path $geminiRoot 'config'))) { exit 0 }
 
-$pluginDir = Join-Path $geminiRoot 'config/plugins/polyphony'
+$pluginDir = Join-Path $geminiRoot (Join-Path (Join-Path 'config' 'plugins') 'polyphony')
 $destDir = Join-Path $pluginDir 'rules'
 try {
     if (-not (Test-Path -LiteralPath $destDir)) {

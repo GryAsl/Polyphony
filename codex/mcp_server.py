@@ -549,7 +549,13 @@ def _dispatch(name: str, args: dict) -> dict:
         elif action == "cancel_all":
             argv = ["cancel-all"]
         stdin_text = str(args.get("prompt") or "") if action == "start" else None
-        return _run_shell("agy-job.sh", argv, _cwd(args), stdin_text)
+        receipt = _run_shell("agy-job.sh", argv, _cwd(args), stdin_text)
+        if action == "start" and receipt.get("exit_code") == 0:
+            for line in str(receipt.get("stdout") or "").splitlines():
+                if line.strip():
+                    receipt["job_id"] = line.strip().split()[-1]
+                    break
+        return receipt
 
     if name == "quota":
         action = str(args.get("action") or "")
@@ -709,7 +715,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.63"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.64"},
             },
         }
     if method == "notifications/initialized":

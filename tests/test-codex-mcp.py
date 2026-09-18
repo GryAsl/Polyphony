@@ -274,6 +274,17 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(argv.count("--dir"), 2)
         self.assertEqual(self.calls[-1][1]["input"], "do it")
 
+    def test_job_start_returns_a_structured_job_id(self):
+        old_run = mcp.subprocess.run
+        mcp.subprocess.run = lambda argv, **kwargs: types.SimpleNamespace(
+            returncode=0, stdout="mcp-job-123\n", stderr=""
+        )
+        try:
+            receipt = mcp._dispatch("job", {"action": "start", "prompt": "run it"})
+        finally:
+            mcp.subprocess.run = old_run
+        self.assertEqual(receipt["job_id"], "mcp-job-123")
+
     def test_authored_unicode_prompts_use_utf8_stdin_not_windows_argv(self):
         cases = (
             ("delegate", {"prompt": "Türkçe 🏰 görev"}, "-"),
@@ -332,7 +343,7 @@ class McpAdapterTests(unittest.TestCase):
 
     def test_server_version_matches_manifests(self):
         response = mcp.handle_request({"id": 1, "method": "initialize", "params": {}})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.63")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.64")
         negotiated = mcp.handle_request({
             "id": 2,
             "method": "initialize",
@@ -341,7 +352,7 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(negotiated["result"]["protocolVersion"], mcp.PROTOCOL_VERSION)
         for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
             data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
-            self.assertEqual(data["version"], "0.31.63")
+            self.assertEqual(data["version"], "0.31.64")
 
     def test_exit_code_stdout_and_stderr_are_preserved(self):
         def failed(argv, **kwargs):

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.31.64 — PR #5 follow-up reliability fixes
+
+- Make Codex MCP `agy-job start` a first-class work-producing operation. Successful starts now
+  return a structured `job_id`, the strict Stop gate records nested MCP job envelopes as pending,
+  and `agy-job result` remains the terminal release path. Failed launch responses are recorded as
+  failures instead of being mistaken for live workers.
+- Make the Agy rules installer and its parity test safe under PowerShell Core on POSIX when
+  `cygpath` is unavailable; no literal Windows backslashes are appended to POSIX paths.
+- Make the opt-in live rules test honor `GEMINI_HOME`, matching both installers instead of always
+  probing `$HOME/.gemini`.
+- Add regression coverage for nested MCP job IDs, failed MCP starts, structured MCP receipts,
+  POSIX installer paths, and custom Gemini homes.
+
 ## 0.31.63 — Engineering rules for every agy worker
 
 - Ship `agy/rules/coding-quality.md` and install it into `~/.gemini/config/plugins/polyphony/rules/`

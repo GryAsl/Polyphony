@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 [ "${POLYPHONY_LIVE_AGY:-0}" = "1" ] || skip "set POLYPHONY_LIVE_AGY=1 to run (spends Gemini quota)"
 command -v agy >/dev/null 2>&1 || skip "agy is not installed"
 
-GEMINI_ROOT="$HOME/.gemini"
+GEMINI_ROOT="${GEMINI_HOME:-$HOME/.gemini}"
 PLUGIN_DIR="$GEMINI_ROOT/config/plugins/polyphony"
 [ -f "$PLUGIN_DIR/rules/coding-quality.md" ] \
   || skip "rules are not installed here — run hooks/install-agy-rules.sh first"
