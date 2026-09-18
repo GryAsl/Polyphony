@@ -1103,7 +1103,10 @@ def is_work_producing_agy_call(tool_name: str, tool_input: dict) -> bool:
         }:
             return True
         if wrapper == "agy-job":
-            return len(tokens) > 1 and tokens[1].lower() == "result"
+            # `start` launches the worker and `result` collects it; both are the
+            # delegation itself, so both mark the turn substantive. list/status/
+            # cancel only read or stop the registry and stay control plane.
+            return len(tokens) > 1 and tokens[1].lower() in {"start", "result"}
         if wrapper == "agy":
             return len(tokens) > 1 and tokens[1].lower() in {
                 "delegate", "scout", "review", "media", "migrate", "cost-compare",
@@ -1327,6 +1330,46 @@ def _background_task_id(*values: any) -> str:
     return ""
 
 
+def _agy_job_start_command(tool_input: any) -> bool:
+    """True when the call is `agy-job start`, the launcher that spawns a worker.
+
+    scripts/agy-job.sh start prints the new job id and returns immediately while
+    the delegate keeps running in the background. Reading that acknowledgement as
+    a finished result would release the strict gate with the work still in flight.
+    """
+    if not isinstance(tool_input, dict):
+        return False
+    cmd = _get_shell_command(tool_input)
+    if not cmd:
+        return False
+    parsed = parse_single_agy_shell_command(cmd)
+    if parsed is None:
+        parsed = _agy_compound_command(cmd)
+    if parsed is None:
+        return False
+    wrapper, tokens = parsed
+    return wrapper == "agy-job" and len(tokens) > 1 and tokens[1].lower() == "start"
+
+
+def _agy_job_started_id(response: any) -> str:
+    """The job id `agy-job start` prints, which is the whole of its stdout.
+
+    The bare id is the real format; taking the last token also survives a host
+    that prefixes it with a word, so the Stop message can always name the job.
+    """
+    obj = _response_dict(response)
+    text = ""
+    if isinstance(obj, dict):
+        text = str(obj.get("stdout") or obj.get("output") or "")
+    elif isinstance(response, str):
+        text = response
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.split()[-1]
+    return ""
+
+
 def _background_result_is_pending(data: dict, tool_input: dict, response: any) -> bool:
     """Return true only for explicit host signals that work is still running.
 
@@ -1335,6 +1378,11 @@ def _background_result_is_pending(data: dict, tool_input: dict, response: any) -
     result is asynchronous would weaken strict routing and hide failures.
     """
     response_obj = _response_dict(response)
+    # `agy-job start` carries no host async flag: it is an ordinary shell call
+    # that exits 0 the moment the worker is spawned. Only the command itself
+    # says the visible result is a launcher acknowledgement.
+    if _agy_job_start_command(tool_input):
+        return True
     # `run_in_background` belongs to the launcher invocation. Its shell
     # command can legitimately report exit 0/completed while the spawned Agy
     # worker is still running, so this signal takes precedence over that
@@ -2097,7 +2145,11 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
     else:
         if _background_result_is_pending(data, tool_input, response):
             state["agy_pending"] = True
-            state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
+            state["agy_task_id"] = (
+                _background_task_id(data, tool_input, response)
+                or _agy_job_started_id(response)
+                or state.get("agy_task_id", "")
+            )
             state["agy_success"] = False
             state["agy_failed"] = False
             state["last_agy_error"] = ""

@@ -25,6 +25,18 @@
   nothing when no agy config tree exists, and warns without ever failing the session. The bash and
   PowerShell installers write a byte-identical manifest, asserted by a test, so they cannot rewrite
   each other's file every session.
+- Treat `agy-job start` as the delegation it is. It launches a worker and returns the new job id
+  immediately, but the hook classified only `agy-job result` as work-producing, so a turn that
+  started a background job left no pending worker: `Stop` allowed the turn to end while the job was
+  still running, with no result collected. Starting a job now marks the turn substantive and the
+  worker pending, and the `Stop` gate names the job id to collect. `list`, `status` and `cancel`
+  stay control plane.
+- Correct three `test-opportunity-hook.py` expectations that asserted behaviour the product had
+  never had or no longer has, and so could not pass: a bare `"2"` counted as a soft selection
+  although 0.31.62 stopped treating bare numerals as answers once the startup routing question was
+  removed; workspace isolation was probed through that removed question instead of through the soft
+  default, and now also asserts the configured workspace stayed strict; and the `agy-job start`
+  case used an invented `Job started: ...` output where the wrapper prints only the bare job id.
 - `scripts/agy-trace.sh --audit` now lists the commands a worker ran. It previously stated that agy
   does not record them; agy records them under `tool_calls[].args.CommandLine`, and the incorrect
   note hid the audit's most useful evidence.

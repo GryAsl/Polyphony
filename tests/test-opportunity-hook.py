@@ -420,7 +420,10 @@ class OpportunityHookTests(unittest.TestCase):
     # --- 4. Soft Choice & Preserved Once-Per-Category Advisory ---
 
     def test_soft_choice_and_preserved_once_per_category_advisory(self):
-        soft_synonyms = ["Use Agy when appropriate (soft)", "soft", "when appropriate", "2"]
+        # A bare numeral is deliberately NOT a mode choice: 0.31.62 stopped asking a
+        # startup routing question, so "2" answers nothing and must not flip routing.
+        # test_turkish_mode_switch_and_numeric_nonselection covers that directly.
+        soft_synonyms = ["Use Agy when appropriate (soft)", "soft", "when appropriate"]
         for syn in soft_synonyms:
             session = str(uuid.uuid4())
             out = self.set_mode(session, syn)
@@ -582,17 +585,23 @@ class OpportunityHookTests(unittest.TestCase):
             "session_id": session4,
             "tool_name": "exec_command",
             "tool_input": {"cmd": "agy-job start --tier flash 'fix bug'"},
-            "tool_response": {"exit_code": 0, "stdout": "Job started: job-456"},
+            # scripts/agy-job.sh start prints the bare job id and nothing else.
+            "tool_response": {"exit_code": 0, "stdout": "20260919-101112-4242-31337"},
         })
         stop_blocked4 = self.invoke({"hook_event_name": "Stop", "session_id": session4})
-        self.assertEqual(json.loads(stop_blocked4).get("decision"), "block")
+        data4 = json.loads(stop_blocked4)
+        self.assertEqual(data4.get("decision"), "block")
+        # The launcher exits 0 while the worker runs, so the gate must name the job
+        # to collect rather than treat the acknowledgement as a finished result.
+        self.assertIn("still running", data4.get("reason", ""))
+        self.assertIn("20260919-101112-4242-31337", data4.get("reason", ""))
 
         # 5. Completed job result
         self.invoke({
             "hook_event_name": "PostToolUse",
             "session_id": session4,
             "tool_name": "exec_command",
-            "tool_input": {"cmd": "agy-job result job-456"},
+            "tool_input": {"cmd": "agy-job result 20260919-101112-4242-31337"},
             "tool_response": {"exit_code": 0, "stdout": "Completed job result text"},
         })
         stop_allowed4 = self.invoke({"hook_event_name": "Stop", "session_id": session4})
@@ -1439,10 +1448,12 @@ class OpportunityHookTests(unittest.TestCase):
             "matcher": "startup",
             "cwd": str(ws_b),
         })
+        # Since 0.31.62 an unconfigured workspace starts soft and is asked nothing,
+        # so B's isolation shows as the default rather than as a pending question.
         data_b = json.loads(start_b)
         ctx_b = data_b["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("Always use Agy (strict)", ctx_b)
-        self.assertIn("Use Agy when appropriate (soft)", ctx_b)
+        self.assertIn("Soft routing is active", ctx_b)
+        self.assertNotIn("unanswered", ctx_b)
 
         tool_b = self.invoke({
             "hook_event_name": "PreToolUse",
@@ -1452,8 +1463,19 @@ class OpportunityHookTests(unittest.TestCase):
             "cwd": str(ws_b),
         })
         hook_b = json.loads(tool_b)["hookSpecificOutput"]
-        self.assertEqual(hook_b.get("permissionDecision"), "deny")
-        self.assertIn("selection is pending", hook_b.get("permissionDecisionReason", ""))
+        self.assertNotIn("permissionDecision", hook_b)
+
+        # The other half of isolation: A really did keep strict. Without this the
+        # test would also pass if no workspace mode were ever persisted at all.
+        tool_a = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session_a,
+            "tool_name": "Read",
+            "tool_input": {"file_path": "src/main.py"},
+            "cwd": str(ws_a),
+        })
+        hook_a = json.loads(tool_a)["hookSpecificOutput"]
+        self.assertEqual(hook_a.get("permissionDecision"), "deny")
 
     def test_malformed_persisted_workspace_state_recovers_to_soft(self):
         ws = Path.cwd().resolve()
