@@ -420,9 +420,6 @@ class OpportunityHookTests(unittest.TestCase):
     # --- 4. Soft Choice & Preserved Once-Per-Category Advisory ---
 
     def test_soft_choice_and_preserved_once_per_category_advisory(self):
-        # A bare numeral is deliberately NOT a mode choice: 0.31.62 stopped asking a
-        # startup routing question, so "2" answers nothing and must not flip routing.
-        # test_turkish_mode_switch_and_numeric_nonselection covers that directly.
         soft_synonyms = ["Use Agy when appropriate (soft)", "soft", "when appropriate"]
         for syn in soft_synonyms:
             session = str(uuid.uuid4())
@@ -585,14 +582,11 @@ class OpportunityHookTests(unittest.TestCase):
             "session_id": session4,
             "tool_name": "exec_command",
             "tool_input": {"cmd": "agy-job start --tier flash 'fix bug'"},
-            # scripts/agy-job.sh start prints the bare job id and nothing else.
             "tool_response": {"exit_code": 0, "stdout": "20260919-101112-4242-31337"},
         })
         stop_blocked4 = self.invoke({"hook_event_name": "Stop", "session_id": session4})
         data4 = json.loads(stop_blocked4)
         self.assertEqual(data4.get("decision"), "block")
-        # The launcher exits 0 while the worker runs, so the gate must name the job
-        # to collect rather than treat the acknowledgement as a finished result.
         self.assertIn("still running", data4.get("reason", ""))
         self.assertIn("20260919-101112-4242-31337", data4.get("reason", ""))
 
@@ -1448,8 +1442,6 @@ class OpportunityHookTests(unittest.TestCase):
             "matcher": "startup",
             "cwd": str(ws_b),
         })
-        # Since 0.31.62 an unconfigured workspace starts soft and is asked nothing,
-        # so B's isolation shows as the default rather than as a pending question.
         data_b = json.loads(start_b)
         ctx_b = data_b["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Soft routing is active", ctx_b)
@@ -1465,8 +1457,6 @@ class OpportunityHookTests(unittest.TestCase):
         hook_b = json.loads(tool_b)["hookSpecificOutput"]
         self.assertNotIn("permissionDecision", hook_b)
 
-        # The other half of isolation: A really did keep strict. Without this the
-        # test would also pass if no workspace mode were ever persisted at all.
         tool_a = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session_a,
@@ -1615,10 +1605,6 @@ class HookManifestPortabilityTests(unittest.TestCase):
                     cmd_win = h.get("commandWindows", "")
                     self.assertIn("${CLAUDE_PLUGIN_ROOT}", cmd)
                     self.assertIn("${CLAUDE_PLUGIN_ROOT}", cmd_win)
-                    # Every hook needs a native-Windows counterpart, but not one
-                    # specific launcher: asserting a filename here would fail any
-                    # new hook that ships its own .ps1. Require a .ps1 under the
-                    # plugin root, and that the file it names actually exists.
                     win_script = re.search(r"\$\{CLAUDE_PLUGIN_ROOT\}/(\S+\.ps1)", cmd_win)
                     self.assertIsNotNone(
                         win_script, f"{event_name}: commandWindows names no .ps1: {cmd_win}")

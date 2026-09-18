@@ -33,11 +33,6 @@ class UpdateCheckerTests(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {
             "POLYPHONY_UPDATE_STATE_FILE": str(Path(self.temp.name) / "state.json"),
             "POLYPHONY_UPDATE_CHECK_INTERVAL_SECONDS": "86400",
-            # tests/run-tests.sh exports POLYPHONY_UPDATE_CHECK=off so the rest of the
-            # suite never reaches the network. These tests are ABOUT the update notice
-            # and mock the fetch themselves, so they must pin the switch on: inheriting
-            # it made the hook return an empty context and the file pass alone but fail
-            # in the suite.
             "POLYPHONY_UPDATE_CHECK": "on",
         }, clear=False)
         self.env.start()

@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-#
-# hooks/install-agy-rules.sh contract. Offline: no agy, no network.
-#
-# The installer writes into the user's real Gemini home, so every case here points
-# GEMINI_HOME at a temp dir. A test that forgot to would silently edit the developer's
-# own agy config and still pass.
-#
-# These cases assert what is ON DISK, which is all an offline test can do. Whether agy
-# then actually loads the rules is a separate question, and getting it wrong is how
-# this feature first shipped dead: rules were installed without the plugin.json
-# manifest agy needs, every check here passed, and no worker ever saw a rule.
-# tests/test-agy-rules-live.sh answers that question against a real agy.
-#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,19 +21,14 @@ fresh_home() {
 RULES="$SRC_DIR/coding-quality.md"
 [ -f "$RULES" ] || fail "agy/rules/coding-quality.md is missing"
 
-# agy ignores a rule whose frontmatter lacks this, silently — no error, no warning.
-# Without this assertion the rule could ship dead and every other test still pass.
 head -5 "$RULES" | grep -q '^trigger: always_on$' \
   || fail "coding-quality.md frontmatter lacks 'trigger: always_on'"
 ok "rule declares trigger: always_on"
 
-# scripts/agy-delegate.sh rejects a prompt of 800+ words. The rule is not sent as a
-# prompt, but it is written to the same budget so it can be pasted into one if needed.
 words="$(wc -w < "$RULES" | tr -d '[:space:]')"
 [ "$words" -lt 800 ] || fail "rule is $words words; keep it under 800"
 ok "rule is $words words (< 800)"
 
-# --- fresh install -----------------------------------------------------------
 H="$(fresh_home)"
 out="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "installer exited non-zero"
 PLUGIN_DIR="$H/.gemini/config/plugins/polyphony"
@@ -56,10 +38,6 @@ cmp -s "$RULES" "$DEST" || fail "installed rule differs from source"
 printf '%s' "$out" | grep -q 'installed 1' || fail "installer did not report the install: $out"
 ok "fresh install copies the rule and reports it"
 
-# --- the manifest agy needs --------------------------------------------------
-# Measured on agy 1.2.6: without plugin.json beside rules/, agy does not treat the
-# directory as a plugin and never reads the rules — no error, no warning. The rule
-# file being present proves nothing on its own, which is what this guards.
 MANIFEST="$PLUGIN_DIR/plugin.json"
 [ -f "$MANIFEST" ] || fail "no plugin.json at $MANIFEST — agy will not read rules/"
 grep -q '"name": "polyphony"' "$MANIFEST" || fail "plugin.json does not name the plugin: $(cat "$MANIFEST")"
@@ -73,14 +51,9 @@ fi
 printf '%s' "$out" | grep -q 'plugin.json' || fail "manifest write was not reported: $out"
 ok "fresh install writes the plugin.json agy needs, and reports it"
 
-# The manifest belongs beside rules/, not inside it: agy looks for it at the plugin
-# root, and a copy under rules/ would also be parsed as a rule.
 [ ! -f "$PLUGIN_DIR/rules/plugin.json" ] || fail "plugin.json was written inside rules/"
 ok "manifest sits at the plugin root, not inside rules/"
 
-# --- idempotence -------------------------------------------------------------
-# A SessionStart hook runs on every session; re-copying each time would churn the
-# disk and clobber a user's local edits on every prompt.
 before="$(stat -c %Y "$DEST" 2>/dev/null || stat -f %m "$DEST")"
 m_before="$(stat -c %Y "$MANIFEST" 2>/dev/null || stat -f %m "$MANIFEST")"
 out2="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "second run exited non-zero"
@@ -91,46 +64,32 @@ m_after="$(stat -c %Y "$MANIFEST" 2>/dev/null || stat -f %m "$MANIFEST")"
 [ "$m_before" = "$m_after" ] || fail "unchanged manifest was rewritten"
 ok "unchanged rule and manifest are not rewritten, and print nothing"
 
-# --- upgrading from a version that shipped without the manifest --------------
-# The rules are already installed and identical, so the copy loop does nothing. If
-# the manifest were only written alongside a rule copy, that machine would stay
-# broken forever. This is the exact shape of the bug this test was added for.
 rm -f "$MANIFEST"
 out_up="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "upgrade run exited non-zero"
 [ -f "$MANIFEST" ] || fail "missing manifest was not restored when the rules were unchanged"
 printf '%s' "$out_up" | grep -q 'plugin.json' || fail "manifest repair was not reported: $out_up"
 ok "a missing manifest is restored even when no rule changed"
 
-# --- content change reinstalls ----------------------------------------------
 printf 'local edit\n' >> "$DEST"
 out3="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "third run exited non-zero"
 cmp -s "$RULES" "$DEST" || fail "changed rule was not restored from source"
 printf '%s' "$out3" | grep -q 'installed 1' || fail "changed rule reinstall was not reported"
 ok "a changed rule is restored from source"
 
-# A user who edited the manifest gets it put back: agy reads it, so a broken one
-# disables the rules just as surely as a missing one.
 printf 'not json\n' > "$MANIFEST"
 out4="$(GEMINI_HOME="$H/.gemini" HOME="$H" bash "$INSTALLER" 2>&1)" || fail "manifest repair run exited non-zero"
 grep -q '"name": "polyphony"' "$MANIFEST" || fail "corrupted manifest was not restored"
 ok "a corrupted manifest is restored from source"
 
-# --- no agy config tree ------------------------------------------------------
-# agy was never run on this machine. Creating the tree ourselves would litter the
-# disk for someone who does not use agy at all.
 H2="$TMPROOT/noagy"; mkdir -p "$H2"
 out5="$(GEMINI_HOME="$H2/.gemini" HOME="$H2" bash "$INSTALLER" 2>&1)" || fail "missing-config run exited non-zero"
 [ ! -d "$H2/.gemini" ] || fail "installer created a Gemini home that did not exist"
 [ -z "$out5" ] || fail "missing agy config should be silent, got: $out5"
 ok "no agy config tree: does nothing, silently"
 
-# --- unwritable destination --------------------------------------------------
-# A SessionStart hook must never fail the session, whatever the filesystem says.
 H3="$(fresh_home)"
 mkdir -p "$H3/.gemini/config/plugins"
 chmod 500 "$H3/.gemini/config/plugins" 2>/dev/null || true
-# Git Bash on Windows accepts chmod and ignores it, so the directory stays writable
-# and this case would assert nothing. Probe first and skip rather than pass falsely.
 if [ "$(id -u)" != "0" ] && ! touch "$H3/.gemini/config/plugins/.probe" 2>/dev/null; then
   set +e
   out6="$(GEMINI_HOME="$H3/.gemini" HOME="$H3" bash "$INSTALLER" 2>&1)"; rc=$?
@@ -144,10 +103,6 @@ else
 fi
 chmod 700 "$H3/.gemini/config/plugins" 2>/dev/null || true
 
-# --- the two installers must agree -------------------------------------------
-# Windows sessions run the .ps1 and everyone else runs the .sh against the same
-# Gemini home. If they disagree on a single byte of the manifest they rewrite each
-# other's file on every session start.
 PS_EXE=""
 for c in pwsh powershell.exe powershell; do
   command -v "$c" >/dev/null 2>&1 && { PS_EXE="$c"; break; }

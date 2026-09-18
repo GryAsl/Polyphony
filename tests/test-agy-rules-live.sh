@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-#
-# Does a real agy worker actually SEE the engineering rules?
-#
-# tests/test-agy-rules-install.sh can only assert what is on disk, and that is how
-# this feature first shipped dead: the rules were installed, every offline check
-# passed, and agy never read them because no plugin.json sat beside rules/. This is
-# the check that would have caught it.
-#
-# Opt-in, and deliberately NOT wired into tests/run-tests.sh: it spends real Gemini
-# quota, needs agy authenticated, and needs the rules already installed into the
-# user's own Gemini home. Run it after changing the installer, the rule file, or
-# after an agy upgrade:
-#
-#   POLYPHONY_LIVE_AGY=1 bash tests/test-agy-rules-live.sh
-#
-# agy was measured to ignore GEMINI_HOME and always read $HOME/.gemini, so this reads
-# the real installed rules. It only asks agy a question; it writes nothing.
-#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,9 +16,6 @@ PLUGIN_DIR="$GEMINI_ROOT/config/plugins/polyphony"
 [ -f "$PLUGIN_DIR/plugin.json" ] \
   || fail "rules are installed but $PLUGIN_DIR/plugin.json is missing — agy will not read them"
 
-# A sentence that appears nowhere but the rule, so a model cannot produce it from
-# general knowledge of how good engineers talk. If the rule is not loaded, agy is
-# told to say so rather than guess.
 PROMPT="Do not use tools. Your instructions may contain a section titled 'Engineering standards'. If they do, complete this sentence VERBATIM from it: 'A test that passes against the unfixed code is ...'. If they contain no such section, reply exactly: ABSENT."
 
 echo "asking a live agy worker what rules it can see..."

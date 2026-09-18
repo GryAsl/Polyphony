@@ -13,11 +13,8 @@
 # "never trust agy's self-reported GREEN" rule actually checkable.
 #
 # WHAT IS RECORDED: one typed step per action — RUN_COMMAND (with exit_code and
-# the command's OUTPUT), CODE_ACTION, VIEW_FILE, LIST_DIRECTORY, PLANNER_RESPONSE.
-# WHAT IS NOT: the command STRING itself. It appears in neither transcript.jsonl,
-# transcript_full.jsonl, nor ~/.gemini/antigravity-cli/log/cli-*.log. You can see
-# THAT a command ran, its exit code and its output — you cannot reconstruct it.
-# To attribute a filesystem change, diff the tree; this tool cannot tell you.
+# the command's OUTPUT), CODE_ACTION, VIEW_FILE, LIST_DIRECTORY, PLANNER_RESPONSE,
+# and the command strings under tool_calls[].args.CommandLine.
 #
 # Usage:
 #   agy-trace.sh <conversationId | path/to/transcript.jsonl>   Pretty-print the steps
@@ -102,10 +99,6 @@ counts, failures, commands, steps = collections.Counter(), [], [], 0
 
 
 def commands_in(step):
-    # agy records what it ran under tool_calls[].args.CommandLine, as a string that
-    # carries its own surrounding quotes. Exit codes live on separate steps, so a
-    # command cannot be paired with its result here — but "what did it run" is the
-    # first question asked of a delegation, and the answer is in the transcript.
     for call in step.get("tool_calls") or []:
         if not isinstance(call, dict):
             continue
@@ -115,11 +108,11 @@ def commands_in(step):
         cmd = args.get("CommandLine")
         if not isinstance(cmd, str):
             continue
-        # The value arrives quoted, and inner quotes arrive escaped; both are noise
-        # when the point is to read what ran.
         cmd = " ".join(cmd.split()).strip('"').replace('\\"', '"')
         if cmd:
             yield cmd
+
+
 with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
     for line in fh:
         line = line.strip()

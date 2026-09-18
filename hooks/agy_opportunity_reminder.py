@@ -1103,9 +1103,6 @@ def is_work_producing_agy_call(tool_name: str, tool_input: dict) -> bool:
         }:
             return True
         if wrapper == "agy-job":
-            # `start` launches the worker and `result` collects it; both are the
-            # delegation itself, so both mark the turn substantive. list/status/
-            # cancel only read or stop the registry and stay control plane.
             return len(tokens) > 1 and tokens[1].lower() in {"start", "result"}
         if wrapper == "agy":
             return len(tokens) > 1 and tokens[1].lower() in {
@@ -1331,12 +1328,6 @@ def _background_task_id(*values: any) -> str:
 
 
 def _agy_job_start_command(tool_input: any) -> bool:
-    """True when the call is `agy-job start`, the launcher that spawns a worker.
-
-    scripts/agy-job.sh start prints the new job id and returns immediately while
-    the delegate keeps running in the background. Reading that acknowledgement as
-    a finished result would release the strict gate with the work still in flight.
-    """
     if not isinstance(tool_input, dict):
         return False
     cmd = _get_shell_command(tool_input)
@@ -1352,11 +1343,6 @@ def _agy_job_start_command(tool_input: any) -> bool:
 
 
 def _agy_job_started_id(response: any) -> str:
-    """The job id `agy-job start` prints, which is the whole of its stdout.
-
-    The bare id is the real format; taking the last token also survives a host
-    that prefixes it with a word, so the Stop message can always name the job.
-    """
     obj = _response_dict(response)
     text = ""
     if isinstance(obj, dict):
@@ -1378,9 +1364,6 @@ def _background_result_is_pending(data: dict, tool_input: dict, response: any) -
     result is asynchronous would weaken strict routing and hide failures.
     """
     response_obj = _response_dict(response)
-    # `agy-job start` carries no host async flag: it is an ordinary shell call
-    # that exits 0 the moment the worker is spawned. Only the command itself
-    # says the visible result is a launcher acknowledgement.
     if _agy_job_start_command(tool_input):
         return True
     # `run_in_background` belongs to the launcher invocation. Its shell
