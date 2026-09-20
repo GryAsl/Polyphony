@@ -27,6 +27,9 @@ SPEC.loader.exec_module(mcp)
 class McpAdapterTests(unittest.TestCase):
     def setUp(self):
         self.calls = []
+        self.account_state = tempfile.TemporaryDirectory()
+        self.old_accounts_dir = os.environ.get("POLYPHONY_ACCOUNTS_DIR")
+        os.environ["POLYPHONY_ACCOUNTS_DIR"] = self.account_state.name
         self.old_run = mcp.subprocess.run
         self.old_bash = mcp._bash
         mcp._bash = lambda: "bash"
@@ -40,6 +43,11 @@ class McpAdapterTests(unittest.TestCase):
     def tearDown(self):
         mcp.subprocess.run = self.old_run
         mcp._bash = self.old_bash
+        if self.old_accounts_dir is None:
+            os.environ.pop("POLYPHONY_ACCOUNTS_DIR", None)
+        else:
+            os.environ["POLYPHONY_ACCOUNTS_DIR"] = self.old_accounts_dir
+        self.account_state.cleanup()
 
     def wrapper(self):
         return Path(self.calls[-1][0][1]).name
@@ -53,6 +61,7 @@ class McpAdapterTests(unittest.TestCase):
             ("media", {"file": "x.png"}, "agy-media.sh"),
             ("job", {"action": "list"}, "agy-job.sh"),
             ("quota", {"action": "check"}, "agy-quota.py"),
+            ("account", {"action": "list"}, "agy_account.py"),
             ("trace", {"action": "last"}, "agy-trace.sh"),
             ("doctor", {}, "doctor.sh"),
             ("migrate", {"arguments": ["--help"]}, "agy-migrate.py"),
@@ -71,6 +80,7 @@ class McpAdapterTests(unittest.TestCase):
         self.assertIn("agent_task", tools)
         self.assertIn("agent_message", tools)
         self.assertIn("persistent_delegate", tools)
+        self.assertIn("account", tools)
         self.assertIn("handoff", tools["agent_task"]["inputSchema"]["properties"]["action"]["enum"])
 
     def test_persistent_delegate_claims_and_reuses_parent_owned_agent(self):
@@ -100,6 +110,38 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(0, first["exit_code"])
         self.assertEqual(first["persistent"]["agent_id"], second["persistent"]["agent_id"])
         self.assertEqual("conv-1", second["persistent"]["conversation_id"])
+
+    def test_persistent_delegate_keeps_conversations_separate_per_account(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            pool = Path(self.account_state.name) / "pool.json"
+            pool.write_text(json.dumps({"current": "personal", "pool_enabled": True}), encoding="utf-8")
+            conversations = iter(("conv-personal", "conv-work", "conv-personal-2"))
+
+            def fake_run(argv, **kwargs):
+                conversation = next(conversations)
+                return types.SimpleNamespace(returncode=0, stdout="OK\n", stderr=f'AGY_USAGE {{"conversation_id":"{conversation}"}}\n')
+
+            old_run = mcp.subprocess.run
+            mcp.subprocess.run = fake_run
+            try:
+                first = mcp._dispatch("persistent_delegate", {"prompt": "one", "parent_agent_id": "main", "workspace": tmp})
+                agent_id = first["persistent"]["agent_id"]
+                pool.write_text(json.dumps({"current": "work", "pool_enabled": True}), encoding="utf-8")
+                second = mcp._dispatch("persistent_delegate", {"prompt": "two", "parent_agent_id": "main", "agent_id": agent_id, "workspace": tmp})
+                pool.write_text(json.dumps({"current": "personal", "pool_enabled": True}), encoding="utf-8")
+                third = mcp._dispatch("persistent_delegate", {"prompt": "three", "parent_agent_id": "main", "agent_id": agent_id, "workspace": tmp})
+            finally:
+                mcp.subprocess.run = old_run
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+
+        self.assertEqual("personal", first["persistent"]["account_id"])
+        self.assertEqual("work", second["persistent"]["account_id"])
+        self.assertEqual("personal", third["persistent"]["account_id"])
 
     def test_persistent_delegate_resume_failure_rotates_once_without_duplicate_checkpoint(self):
         old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
@@ -343,7 +385,7 @@ class McpAdapterTests(unittest.TestCase):
 
     def test_server_version_matches_manifests(self):
         response = mcp.handle_request({"id": 1, "method": "initialize", "params": {}})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.64")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.65")
         negotiated = mcp.handle_request({
             "id": 2,
             "method": "initialize",
@@ -352,7 +394,7 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(negotiated["result"]["protocolVersion"], mcp.PROTOCOL_VERSION)
         for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
             data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
-            self.assertEqual(data["version"], "0.31.64")
+            self.assertEqual(data["version"], "0.31.65")
 
     def test_exit_code_stdout_and_stderr_are_preserved(self):
         def failed(argv, **kwargs):

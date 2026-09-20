@@ -28,6 +28,7 @@ class QuotaTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.env = os.environ.copy()
         self.env["AGY_QUOTA_STATE_DIR"] = str(self.root / "state")
+        self.env["POLYPHONY_ACCOUNTS_DIR"] = str(self.root / "accounts")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -134,6 +135,32 @@ class QuotaTests(unittest.TestCase):
             measured = quota._query_live(None)
         self.assertEqual(measured["7d"]["remaining"], 81.0)
         self.assertEqual(measured["5h"]["remaining"], 64.0)
+
+    def test_quota_state_is_isolated_per_active_account(self):
+        pool = Path(self.env["POLYPHONY_ACCOUNTS_DIR"])
+        pool.mkdir(parents=True)
+        state_file = pool / "pool.json"
+        state_file.write_text(json.dumps({"current": "personal", "pool_enabled": True}), encoding="utf-8")
+        personal = self.invoke("--input", str(self.usage(80, 70)), "--json")
+        self.assertEqual("personal", self.payload(personal.stdout)["account_id"])
+
+        state_file.write_text(json.dumps({"current": "work", "pool_enabled": True}), encoding="utf-8")
+        work = self.invoke("--input", str(self.usage(30, 20, "work.txt")), "--json")
+        self.assertEqual(30.0, self.payload(work.stdout)["gemini"]["5h"]["remaining"])
+
+        state_file.write_text(json.dumps({"current": "personal", "pool_enabled": True}), encoding="utf-8")
+        restored = self.invoke("--state-only", "--json")
+        self.assertEqual(80.0, self.payload(restored.stdout)["gemini"]["5h"]["remaining"])
+
+    def test_disabled_pool_preserves_legacy_global_quota_state(self):
+        pool = Path(self.env["POLYPHONY_ACCOUNTS_DIR"])
+        pool.mkdir(parents=True)
+        (pool / "pool.json").write_text(
+            json.dumps({"current": "personal", "pool_enabled": False}), encoding="utf-8"
+        )
+        measured = self.invoke("--input", str(self.usage(66, 55)), "--json")
+        self.assertIsNone(self.payload(measured.stdout)["account_id"])
+        self.assertTrue((Path(self.env["AGY_QUOTA_STATE_DIR"]) / "state.json").exists())
 
 
 if __name__ == "__main__":

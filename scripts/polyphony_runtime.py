@@ -20,7 +20,7 @@ import uuid
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_MESSAGE_CHARS = 8_000
 DEFAULT_LEASE_SECONDS = 3600
 DEFAULT_MAX_HOPS = 2
@@ -114,10 +114,22 @@ class Runtime:
               ON agents(parent_agent_id, workspace_id, status, last_used_at);
             CREATE UNIQUE INDEX IF NOT EXISTS agents_conversation_idx
               ON agents(conversation_id) WHERE conversation_id IS NOT NULL;
+            CREATE TABLE IF NOT EXISTS agent_conversations (
+                agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                account_id TEXT NOT NULL,
+                conversation_id TEXT,
+                conversation_generation INTEGER NOT NULL DEFAULT 1,
+                checkpoint TEXT,
+                last_used_at REAL NOT NULL,
+                PRIMARY KEY(agent_id, account_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS account_conversation_owner_idx
+              ON agent_conversations(conversation_id) WHERE conversation_id IS NOT NULL;
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL REFERENCES agents(id),
                 parent_task_id TEXT,
+                account_id TEXT,
                 workspace_id TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','cancelled')),
                 summary TEXT NOT NULL,
@@ -149,12 +161,19 @@ class Runtime:
         row = self.conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         if row is None:
             self.conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
-        elif int(row[0]) != SCHEMA_VERSION:
-            raise RuntimeErrorBase(f"unsupported runtime schema {row[0]} (expected {SCHEMA_VERSION})")
+        else:
+            version = int(row[0])
+            if version == 1:
+                columns = {item[1] for item in self.conn.execute("PRAGMA table_info(tasks)")}
+                if "account_id" not in columns:
+                    self.conn.execute("ALTER TABLE tasks ADD COLUMN account_id TEXT")
+                self.conn.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
+            elif version != SCHEMA_VERSION:
+                raise RuntimeErrorBase(f"unsupported runtime schema {row[0]} (expected {SCHEMA_VERSION})")
 
     def _recover_stale_locked(self, at: float) -> int:
         stale = self.conn.execute(
-            "SELECT id, agent_id, summary FROM tasks WHERE status IN ('pending','running') "
+            "SELECT id, agent_id, account_id, summary FROM tasks WHERE status IN ('pending','running') "
             "AND lease_expires_at IS NOT NULL AND lease_expires_at < ?", (at,)
         ).fetchall()
         for row in stale:
@@ -163,12 +182,30 @@ class Runtime:
                 "AND status IN ('pending','running')", (at, row["id"])
             )
             checkpoint = f"Previous task timed out or crashed: {row['summary']}"
-            self.conn.execute(
-                "UPDATE agents SET status='idle', current_task_id=NULL, lease_expires_at=NULL, "
-                "conversation_id=NULL, conversation_generation=conversation_generation + 1, "
-                "checkpoint=?, last_seen_at=? "
-                "WHERE id=? AND current_task_id=?", (checkpoint, at, row["agent_id"], row["id"])
-            )
+            if row["account_id"]:
+                mapped = self.conn.execute(
+                    "SELECT conversation_generation FROM agent_conversations WHERE agent_id=? AND account_id=?",
+                    (row["agent_id"], row["account_id"]),
+                ).fetchone()
+                generation = int(mapped[0]) + 1 if mapped else 2
+                self.conn.execute(
+                    "INSERT INTO agent_conversations(agent_id,account_id,conversation_id,conversation_generation,checkpoint,last_used_at) "
+                    "VALUES(?,?,NULL,?,?,?) ON CONFLICT(agent_id,account_id) DO UPDATE SET "
+                    "conversation_id=NULL, conversation_generation=excluded.conversation_generation, "
+                    "checkpoint=excluded.checkpoint, last_used_at=excluded.last_used_at",
+                    (row["agent_id"], row["account_id"], generation, checkpoint, at),
+                )
+                self.conn.execute(
+                    "UPDATE agents SET status='idle', current_task_id=NULL, lease_expires_at=NULL, last_seen_at=? "
+                    "WHERE id=? AND current_task_id=?", (at, row["agent_id"], row["id"])
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE agents SET status='idle', current_task_id=NULL, lease_expires_at=NULL, "
+                    "conversation_id=NULL, conversation_generation=conversation_generation + 1, "
+                    "checkpoint=?, last_seen_at=? "
+                    "WHERE id=? AND current_task_id=?", (checkpoint, at, row["agent_id"], row["id"])
+                )
         return len(stale)
 
     def recover_stale(self) -> int:
@@ -193,6 +230,7 @@ class Runtime:
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
         max_hops: int = DEFAULT_MAX_HOPS,
         max_fanout: int = DEFAULT_MAX_FANOUT,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         if not parent_agent_id.strip():
             raise ValueError("parent_agent_id is required")
@@ -261,13 +299,49 @@ class Runtime:
                 )
                 selected = self.conn.execute("SELECT * FROM agents WHERE id=?", (selected_id,)).fetchone()
 
+            conversation_id = selected["conversation_id"]
+            conversation_generation = selected["conversation_generation"]
+            checkpoint = selected["checkpoint"]
+            if account_id:
+                mapped = self.conn.execute(
+                    "SELECT * FROM agent_conversations WHERE agent_id=? AND account_id=?",
+                    (selected["id"], account_id),
+                ).fetchone()
+                if not mapped and selected["conversation_id"]:
+                    # Idempotent lazy migration: the first known saved account adopts
+                    # the legacy conversation; later accounts always get their own.
+                    any_mapping = self.conn.execute(
+                        "SELECT 1 FROM agent_conversations WHERE agent_id=? LIMIT 1", (selected["id"],)
+                    ).fetchone()
+                    if not any_mapping:
+                        self.conn.execute(
+                            "INSERT INTO agent_conversations(agent_id,account_id,conversation_id,conversation_generation,checkpoint,last_used_at) "
+                            "VALUES(?,?,?,?,?,?)",
+                            (selected["id"], account_id, selected["conversation_id"], selected["conversation_generation"], selected["checkpoint"], at),
+                        )
+                        self.conn.execute(
+                            "UPDATE agents SET conversation_id=NULL, checkpoint=NULL WHERE id=?", (selected["id"],)
+                        )
+                        mapped = self.conn.execute(
+                            "SELECT * FROM agent_conversations WHERE agent_id=? AND account_id=?",
+                            (selected["id"], account_id),
+                        ).fetchone()
+                if mapped:
+                    conversation_id = mapped["conversation_id"]
+                    conversation_generation = mapped["conversation_generation"]
+                    checkpoint = mapped["checkpoint"]
+                else:
+                    conversation_id = None
+                    conversation_generation = 1
+                    checkpoint = None
+
             task_id = "task-" + uuid.uuid4().hex
             token = uuid.uuid4().hex
             expiry = at + lease_seconds
             self.conn.execute(
-                "INSERT INTO tasks(id,agent_id,parent_task_id,workspace_id,status,summary,hop_count,created_at,started_at,heartbeat_at,lease_expires_at,lease_token,attempts) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)",
-                (task_id, selected["id"], parent_task_id, wid, "running", summary[:2_000], hop, at, at, at, expiry, token),
+                "INSERT INTO tasks(id,agent_id,parent_task_id,account_id,workspace_id,status,summary,hop_count,created_at,started_at,heartbeat_at,lease_expires_at,lease_token,attempts) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
+                (task_id, selected["id"], parent_task_id, account_id, wid, "running", summary[:2_000], hop, at, at, at, expiry, token),
             )
             self.conn.execute(
                 "UPDATE agents SET status='active', current_task_id=?, last_used_at=?, last_seen_at=?, lease_expires_at=? WHERE id=?",
@@ -279,9 +353,10 @@ class Runtime:
                 "agent_id": selected["id"],
                 "parent_agent_id": parent_agent_id,
                 "workspace_id": wid,
-                "conversation_id": selected["conversation_id"],
-                "conversation_generation": selected["conversation_generation"],
-                "checkpoint": selected["checkpoint"],
+                "account_id": account_id,
+                "conversation_id": conversation_id,
+                "conversation_generation": conversation_generation,
+                "checkpoint": checkpoint,
                 "lease_token": token,
                 "hop_count": hop,
             }
@@ -353,7 +428,7 @@ class Runtime:
             self.conn.execute("ROLLBACK")
             raise
 
-    def set_conversation(self, agent_id: str, parent_agent_id: str, workspace: str, conversation_id: str | None) -> dict[str, Any]:
+    def set_conversation(self, agent_id: str, parent_agent_id: str, workspace: str, conversation_id: str | None, account_id: str | None = None) -> dict[str, Any]:
         wsid = workspace_key(workspace)
         if conversation_id is not None:
             conversation_id = conversation_id.strip() or None
@@ -367,12 +442,43 @@ class Runtime:
                 raise NotFound("agent is not owned by this parent in this workspace")
             if target["status"] == "dead":
                 raise Busy("agent is dead")
+            if account_id:
+                if conversation_id:
+                    owner = self.conn.execute(
+                        "SELECT agent_id, account_id FROM agent_conversations WHERE conversation_id=? "
+                        "AND NOT (agent_id=? AND account_id=?)",
+                        (conversation_id, agent_id, account_id),
+                    ).fetchone()
+                    legacy_owner = self.conn.execute(
+                        "SELECT id FROM agents WHERE conversation_id=? AND id != ?", (conversation_id, agent_id)
+                    ).fetchone()
+                    if owner or legacy_owner:
+                        raise Busy("conversation is already owned by another agent or account")
+                generation = self.conn.execute(
+                    "SELECT conversation_generation FROM agent_conversations WHERE agent_id=? AND account_id=?",
+                    (agent_id, account_id),
+                ).fetchone()
+                self.conn.execute(
+                    "INSERT INTO agent_conversations(agent_id,account_id,conversation_id,conversation_generation,checkpoint,last_used_at) "
+                    "VALUES(?,?,?,?,NULL,?) ON CONFLICT(agent_id,account_id) DO UPDATE SET "
+                    "conversation_id=excluded.conversation_id, checkpoint=NULL, last_used_at=excluded.last_used_at",
+                    (agent_id, account_id, conversation_id, int(generation[0]) if generation else 1, now()),
+                )
+                result = dict(self.conn.execute(
+                    "SELECT * FROM agent_conversations WHERE agent_id=? AND account_id=?", (agent_id, account_id)
+                ).fetchone())
+                self.conn.execute("COMMIT")
+                return result
             if conversation_id:
                 owner = self.conn.execute(
                     "SELECT id, parent_agent_id, workspace_id FROM agents WHERE conversation_id=? AND id != ?",
                     (conversation_id, agent_id),
                 ).fetchone()
-                if owner:
+                account_owner = self.conn.execute(
+                    "SELECT agent_id, account_id FROM agent_conversations WHERE conversation_id=?",
+                    (conversation_id,),
+                ).fetchone()
+                if owner or account_owner:
                     raise Busy("conversation is already owned by another agent, parent, or workspace")
             self.conn.execute(
                 "UPDATE agents SET conversation_id=?, checkpoint=NULL, last_seen_at=? WHERE id=?",
@@ -385,7 +491,7 @@ class Runtime:
             self.conn.execute("ROLLBACK")
             raise
 
-    def resume_fallback(self, agent_id: str, parent_agent_id: str, workspace: str, checkpoint: str = "") -> dict[str, Any]:
+    def resume_fallback(self, agent_id: str, parent_agent_id: str, workspace: str, checkpoint: str = "", account_id: str | None = None) -> dict[str, Any]:
         if len(checkpoint) > 12_000:
             raise ValueError("checkpoint is too large")
         wsid = workspace_key(workspace)
@@ -396,6 +502,21 @@ class Runtime:
                 raise NotFound("agent is not owned by this parent in this workspace")
             if row["status"] == "dead":
                 raise Busy("agent is dead")
+            if account_id:
+                mapped = self.conn.execute(
+                    "SELECT conversation_generation FROM agent_conversations WHERE agent_id=? AND account_id=?",
+                    (agent_id, account_id),
+                ).fetchone()
+                generation = int(mapped[0]) + 1 if mapped else 2
+                self.conn.execute(
+                    "INSERT INTO agent_conversations(agent_id,account_id,conversation_id,conversation_generation,checkpoint,last_used_at) "
+                    "VALUES(?,?,NULL,?,?,?) ON CONFLICT(agent_id,account_id) DO UPDATE SET "
+                    "conversation_id=NULL, conversation_generation=excluded.conversation_generation, "
+                    "checkpoint=excluded.checkpoint, last_used_at=excluded.last_used_at",
+                    (agent_id, account_id, generation, checkpoint, now()),
+                )
+                self.conn.execute("COMMIT")
+                return {"agent_id": agent_id, "account_id": account_id, "conversation_id": None, "conversation_generation": generation, "checkpoint": checkpoint}
             generation = int(row["conversation_generation"]) + 1
             self.conn.execute("UPDATE agents SET conversation_id=NULL, conversation_generation=?, checkpoint=?, last_seen_at=? WHERE id=?", (generation, checkpoint, now(), agent_id))
             self.conn.execute("COMMIT")
@@ -505,27 +626,27 @@ def cli(argv: Iterable[str] | None = None) -> int:
     sub.add_parser("init")
     p = sub.add_parser("claim")
     p.add_argument("--parent", required=True); p.add_argument("--workspace", required=True); p.add_argument("--summary", required=True)
-    p.add_argument("--agent"); p.add_argument("--parent-task"); p.add_argument("--fresh-agent", action="store_true"); p.add_argument("--lease", type=int, default=DEFAULT_LEASE_SECONDS)
+    p.add_argument("--agent"); p.add_argument("--parent-task"); p.add_argument("--account"); p.add_argument("--fresh-agent", action="store_true"); p.add_argument("--lease", type=int, default=DEFAULT_LEASE_SECONDS)
     p = sub.add_parser("heartbeat"); p.add_argument("task"); p.add_argument("token"); p.add_argument("--lease", type=int, default=DEFAULT_LEASE_SECONDS)
     p = sub.add_parser("finish"); p.add_argument("task"); p.add_argument("token"); p.add_argument("--status", default="completed")
     p = sub.add_parser("send"); p.add_argument("--workspace", required=True); p.add_argument("--from", dest="sender", required=True); p.add_argument("--to", required=True); p.add_argument("--message", required=True); p.add_argument("--task"); p.add_argument("--type", default="message")
     p = sub.add_parser("inbox"); p.add_argument("--workspace", required=True); p.add_argument("--to", required=True); p.add_argument("--from", dest="sender"); p.add_argument("--task"); p.add_argument("--all", action="store_true"); p.add_argument("--limit", type=int, default=50)
     p = sub.add_parser("wait"); p.add_argument("--workspace", required=True); p.add_argument("--to", required=True); p.add_argument("--from", dest="sender"); p.add_argument("--task"); p.add_argument("--timeout", type=float, default=120)
     p = sub.add_parser("agents"); p.add_argument("--workspace", required=True); p.add_argument("--parent")
-    p = sub.add_parser("resume-fallback"); p.add_argument("--agent", required=True); p.add_argument("--parent", required=True); p.add_argument("--workspace", required=True); p.add_argument("--checkpoint", default="")
+    p = sub.add_parser("resume-fallback"); p.add_argument("--agent", required=True); p.add_argument("--parent", required=True); p.add_argument("--workspace", required=True); p.add_argument("--checkpoint", default=""); p.add_argument("--account")
     p = sub.add_parser("handoff"); p.add_argument("task"); p.add_argument("--from", dest="sender", required=True); p.add_argument("--to", dest="recipient", required=True); p.add_argument("--token", required=True); p.add_argument("--lease", type=int, default=DEFAULT_LEASE_SECONDS); p.add_argument("--max-hops", type=int, default=DEFAULT_MAX_HOPS)
     args = parser.parse_args(list(argv) if argv is not None else None)
     runtime = Runtime(args.db)
     try:
         if args.command == "init": result = {"db": str(runtime.path), "schema_version": SCHEMA_VERSION}
-        elif args.command == "claim": result = runtime.claim_task(args.parent, args.workspace, args.summary, agent_id=args.agent, parent_task_id=args.parent_task, fresh_agent=args.fresh_agent, lease_seconds=args.lease)
+        elif args.command == "claim": result = runtime.claim_task(args.parent, args.workspace, args.summary, agent_id=args.agent, parent_task_id=args.parent_task, fresh_agent=args.fresh_agent, lease_seconds=args.lease, account_id=args.account)
         elif args.command == "heartbeat": result = {"ok": runtime.heartbeat(args.task, args.token, args.lease)}
         elif args.command == "finish": result = {"ok": runtime.finish_task(args.task, args.token, args.status)}
         elif args.command == "send": result = runtime.send(args.workspace, args.sender, args.to, args.message, task_id=args.task, message_type=args.type)
         elif args.command == "inbox": result = runtime.inbox(args.workspace, args.to, from_agent=args.sender, task_id=args.task, unread_only=not args.all, limit=args.limit)
         elif args.command == "wait": result = runtime.wait(args.workspace, args.to, from_agent=args.sender, task_id=args.task, timeout=args.timeout)
         elif args.command == "agents": result = runtime.list_agents(args.workspace, args.parent)
-        elif args.command == "resume-fallback": result = runtime.resume_fallback(args.agent, args.parent, args.workspace, args.checkpoint)
+        elif args.command == "resume-fallback": result = runtime.resume_fallback(args.agent, args.parent, args.workspace, args.checkpoint, account_id=args.account)
         elif args.command == "handoff": result = runtime.handoff_task(args.task, args.sender, args.recipient, args.token, args.lease, args.max_hops)
         else: raise AssertionError(args.command)
         _json(result); return 0

@@ -66,6 +66,18 @@ run "persistent ownership safeguard" "${PY[@]}" "$ROOT/tests/test-runtime.py" \
   RuntimeTests.test_fresh_agent_and_workspace_isolation
 fi
 
+if [ "$FULL" -eq 1 ]; then
+run "account pool state and credential safety" "${PY[@]}" "$ROOT/tests/test-account-pool.py"
+run "bounded account failover" "${PY[@]}" "$ROOT/tests/test-account-failover.py"
+else
+run "account pool critical path" "${PY[@]}" "$ROOT/tests/test-account-pool.py" \
+  AccountPoolTests.test_add_switch_and_fingerprint \
+  AccountPoolTests.test_encryption_and_no_plaintext_on_disk \
+  AccountPoolTests.test_windows_record_round_trip_preserves_metadata \
+  AccountPoolTests.test_switch_blocked_hook_point
+run "account failover critical path" "${PY[@]}" "$ROOT/tests/test-account-failover.py" \
+  AccountFailoverTests.test_explicit_quota_failure_rotates_and_retries_in_new_process
+fi
 run "agy rules installer" "$ROOT/tests/test-agy-rules-install.sh"
 
 run "manifest JSON" "${PY[@]}" - "$ROOT" <<'PY'

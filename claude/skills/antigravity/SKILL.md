@@ -39,6 +39,12 @@ or MCP connection was reset, and report a saved choice only after a successful p
 
 **Control-plane exceptions:** Mode recording/changes, quota checks/choices, job/trace/doctor/cancel management, reading bootstrap policy/config, bounded local conductor checks, and user interaction are exempt from delegation gating.
 
+**Optional local account pool:** `agy-account` controls saved, user-authorized Agy logins. The
+pool is disabled by default and must be explicitly enabled. It keeps the current healthy account,
+rotates only on classified quota/auth failure, starts a fresh Agy process after switching, and never
+reuses an account-owned conversation ID under another account. If switching is blocked or every
+eligible account is exhausted, use the existing Sonnet-or-wait quota decision flow.
+
 **Compact task contracts (Claude and Codex, all effort levels):** Aim for 200–500 words and keep the total authored instructions strictly below 800 words. At 800 words, stop and summarize before launching or writing more. Count all pieces of the same prompt together; stdin, task files, and multiple writes are not exemptions. Reference paths and desired outcomes instead of pasting code or step-by-step implementation. Split genuinely independent tasks when useful; never split one oversized prompt merely to evade the cap. Wrapper-generated review diffs are source data and retain their separate size limit.
 
 **Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. The host may also perform at most three bounded operations on one small file per turn (a small/chunked read, capped single-file grep, or one short non-sensitive replacement). Host-only tools without equivalent Agy access remain advisory. Broad discovery, implementation, review, tests and Git mutations still require Agy; command length or the word `python` alone does not make substantive work exempt.

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Local account-manager and pool manager CLI for Polyphony.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${AGY_BRIDGE_PYTHON:-}" ] && "$AGY_BRIDGE_PYTHON" -c 'import sys' >/dev/null 2>&1; then
+  exec "$AGY_BRIDGE_PYTHON" "$ROOT/scripts/agy_account.py" "$@"
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import sys' >/dev/null 2>&1; then
+  exec python3 "$ROOT/scripts/agy_account.py" "$@"
+elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+  exec py -3 "$ROOT/scripts/agy_account.py" "$@"
+elif command -v python >/dev/null 2>&1 && python -c 'import sys' >/dev/null 2>&1; then
+  exec python "$ROOT/scripts/agy_account.py" "$@"
+fi
+echo "agy-account: Python 3 was not found" >&2
+exit 2

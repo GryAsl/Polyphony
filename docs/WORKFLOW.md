@@ -57,3 +57,12 @@ Use 30-minute hard timeouts for real work, 45–60 minutes for broad/build-heavy
 only for probes. Read failures explicitly; quota depletion requires the user's Sonnet-or-wait choice.
 Run changed-area tests only, with parallel independent checks when useful; no routine full-suite loops.
 Permissions are opt-in as documented in the README. Never infer write/push authorization from yolo.
+
+## Optional local account failover
+
+The account pool is an opt-in control-plane facility for Agy logins the user already owns and has
+authorized. It is sticky, not load balancing: keep the current healthy account and rotate only after
+an explicit quota/auth classification. Switching is lock-protected and blocked while an unrelated
+Agy worker is active. A successful switch starts a new Agy process, tries no account twice, and uses
+an account-specific persistent conversation. If no eligible account remains, the existing quota
+choice is the final fallback. Never create accounts, export credentials, or infer authorization.

@@ -42,6 +42,7 @@ APPROVED_AGY_WRAPPERS = {
     "agy-doctor",
     "agy-trace",
     "agy-quota",
+    "agy-account",
     "agy-media",
     "agy-migrate",
     "agy-cost-compare",
@@ -425,6 +426,20 @@ def _delete_state(session_id: str) -> None:
 def _quota_state_path() -> Path:
     configured = os.environ.get("AGY_QUOTA_STATE_DIR")
     root = Path(configured).expanduser() if configured else Path.home() / ".antigravity-quota"
+    account_root = os.environ.get("POLYPHONY_ACCOUNTS_DIR") or os.environ.get("POLYPHONY_ACCOUNTS_ROOT")
+    if account_root:
+        pool_path = Path(account_root).expanduser() / "pool.json"
+    elif os.name == "nt" and (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")):
+        pool_path = Path(os.environ.get("LOCALAPPDATA") or os.environ["APPDATA"]) / "Polyphony" / "accounts" / "pool.json"
+    else:
+        pool_path = Path.home() / ".local" / "share" / "Polyphony" / "accounts" / "pool.json"
+    try:
+        pool = json.loads(pool_path.read_text(encoding="utf-8"))
+        active = pool.get("current") if isinstance(pool, dict) and pool.get("pool_enabled") else None
+        if active and re.fullmatch(r"[A-Za-z0-9_-]+", str(active)):
+            return root / "accounts" / str(active) / "state.json"
+    except Exception:
+        pass
     return root / "state.json"
 
 
@@ -1154,8 +1169,8 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
             return True
 
     # Quota MCP tools
-    if lowered_name == "mcp__antigravity__quota" or (
-        lowered_name.startswith("mcp__antigravity__") and lowered_name.endswith("__quota")
+    if lowered_name in {"mcp__antigravity__quota", "mcp__antigravity__account"} or (
+        lowered_name.startswith("mcp__antigravity__") and lowered_name.endswith(("__quota", "__account"))
     ):
         return True
 
@@ -1170,7 +1185,7 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
         cmd = _get_shell_command(tool_input)
         if cmd:
             parsed = parse_single_agy_shell_command(cmd)
-            if parsed is not None and parsed[0] == "agy-quota":
+            if parsed is not None and parsed[0] in {"agy-quota", "agy-account"}:
                 return True
 
     # Doctor / trace / job management MCP tools

@@ -575,11 +575,24 @@ done
 
 # 4b2. bin/ entrypoints executable (added to the Bash-tool PATH; commands/skills call
 #      these bare names — $CLAUDE_PLUGIN_ROOT is not exported to model-run Bash, issue #11)
-for b in agy-delegate agy-job agy-cost-compare agy-doctor cloud-debug agy-trace measure-session agy-media agy-review agy-scout agy-quota polyphony-agent; do
+for b in agy-delegate agy-job agy-cost-compare agy-doctor cloud-debug agy-trace measure-session agy-media agy-review agy-scout agy-quota agy-account polyphony-agent; do
   if [ -x "$ROOT/bin/$b" ]; then ok "bin/$b executable"; else
     bad "bin/$b not executable"; info "fix: chmod +x \"$ROOT/bin/$b\""
   fi
 done
+
+# 4b3. The account pool is optional. Diagnose its local backend/state without
+# contacting Agy or exposing credential material.
+if resolve_bridge_python; then
+  ACCOUNT_DIAG="$("${BRIDGE_PY[@]}" "$HERE/agy_account.py" --json doctor 2>/dev/null)"
+  ACCOUNT_RC=$?
+  if [ "$ACCOUNT_RC" -eq 0 ]; then
+    ok "Agy account-pool backend available"
+  elif on_windows_native; then
+    warn "Agy account-pool backend needs attention"
+    info "run: agy-account doctor"
+  fi
+fi
 
 # 4c. WSL: agy --add-dir over a Windows mount (/mnt/*) reads via a slow 9p bridge
 if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then

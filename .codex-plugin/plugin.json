@@ -1,6 +1,6 @@
 {
   "name": "antigravity",
-  "version": "0.31.64",
+  "version": "0.31.65",
   "description": "Polyphony: multi-model orchestration from Codex to Antigravity workers through tested shared wrappers.",
   "author": {
     "name": "GryAsl",
@@ -16,7 +16,7 @@
   "interface": {
     "displayName": "Polyphony",
     "shortDescription": "Orchestrate Antigravity workers from Codex",
-    "longDescription": "Delegation, repository scouting, review, research, media, jobs, quota control, traces, diagnostics, migration, Cloud debugging, and cost comparison through the existing Antigravity wrappers.",
+    "longDescription": "Delegation, repository scouting, review, research, media, jobs, quota and opt-in local account controls, traces, diagnostics, migration, Cloud debugging, and cost comparison through the existing Antigravity wrappers.",
     "developerName": "GryAsl",
     "category": "Developer Tools",
     "capabilities": ["Read", "Write"],

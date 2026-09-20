@@ -122,7 +122,33 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
         payload = json.loads(completed.stdout)
-        self.assertEqual(1, payload["schema_version"])
+        self.assertEqual(2, payload["schema_version"])
+
+    def test_conversations_are_scoped_to_account_and_restore_on_switch_back(self):
+        first = self.claim(account_id="personal")
+        self.runtime.finish_task(first["task_id"], first["lease_token"])
+        self.runtime.set_conversation(first["agent_id"], "main", str(self.workspace), "conv-personal", account_id="personal")
+
+        work = self.claim(agent_id=first["agent_id"], account_id="work")
+        self.assertIsNone(work["conversation_id"])
+        self.runtime.finish_task(work["task_id"], work["lease_token"])
+        self.runtime.set_conversation(first["agent_id"], "main", str(self.workspace), "conv-work", account_id="work")
+
+        personal = self.claim(agent_id=first["agent_id"], account_id="personal")
+        self.assertEqual("conv-personal", personal["conversation_id"])
+        self.runtime.finish_task(personal["task_id"], personal["lease_token"])
+
+    def test_stale_account_task_creates_checkpoint_mapping(self):
+        task = self.claim(account_id="personal", lease_seconds=1, summary="account-scoped crash")
+        self.runtime.conn.execute(
+            "UPDATE tasks SET lease_expires_at=? WHERE id=?",
+            (time.time() - 1, task["task_id"]),
+        )
+        self.assertEqual(1, self.runtime.recover_stale())
+        replacement = self.claim(agent_id=task["agent_id"], account_id="personal")
+        self.assertEqual(2, replacement["conversation_generation"])
+        self.assertIn("account-scoped crash", replacement["checkpoint"])
+        self.runtime.finish_task(replacement["task_id"], replacement["lease_token"])
 
     def test_handoff_moves_lease_only_to_idle_sibling(self):
         source = self.claim()

@@ -489,6 +489,7 @@ class OpportunityHookTests(unittest.TestCase):
             ("request_user_input", {"prompt": "confirm"}),
             ("Read", {"file_path": "CLAUDE.md"}),
             ("exec_command", {"cmd": "agy-quota --force"}),
+            ("exec_command", {"cmd": "agy-account current"}),
             ("exec_command", {"cmd": "agy-doctor"}),
             ("exec_command", {"cmd": "agy-trace"}),
             ("exec_command", {"cmd": "agy-job list"}),
@@ -500,6 +501,7 @@ class OpportunityHookTests(unittest.TestCase):
             ("mcp__antigravity__job_status", {"id": "123"}),
             ("mcp__antigravity__job_cancel", {"id": "123"}),
             ("mcp__antigravity__quota", {"action": "check"}),
+            ("mcp__antigravity__account", {"action": "current"}),
         ]
 
         for tool_name, tool_input in exempt_tools:

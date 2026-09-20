@@ -21,7 +21,8 @@ reduces main-agent context use while keeping execution scoped, observable, and v
 - scoped implementation and general delegation
 - read-only repository scouting and independent diff review
 - web research and media analysis
-- background jobs, 5h/7d quota control, traces, diagnostics, migration, Cloud debugging, and cost comparison
+- background jobs, account-aware 5h/7d quota control, traces, diagnostics, migration, Cloud debugging, and cost comparison
+- optional local Agy account profiles with encrypted Windows credential switching and bounded failover
 - non-blocking reminders when a task could be delegated to Gemini
 
 On Windows, the bundled `agy-headless-bridge` v1.2.1 runs headless workers through ConPTY;
@@ -129,6 +130,7 @@ agy-scout --tier flash-medium --dir "C:\path\to\repo" "Trace the request flow"
 agy-review --tier flash --dir "C:\path\to\repo" --staged --goal "Implement feature X"
 agy-job start --tier flash --dir "C:\path\to\repo" "Complete this long-running task"
 agy-quota --force
+agy-account list
 ```
 
 Routine calls default to 30 minutes; use `--timeout 45m` or `--timeout 60m` for broad,
@@ -146,11 +148,44 @@ active task at a time, with leases, heartbeat/stale recovery, bounded delegation
 handoff, and a fresh-conversation fallback when resume fails. Claude and Codex use the same Python
 runtime; ordinary `delegate` remains available when isolation is preferred.
 
+## Local Agy account pool
+
+On native Windows, Polyphony can save the Agy login that already exists in Credential Manager
+under `gemini:antigravity`. Saved records are encrypted for the current Windows user with DPAPI;
+OAuth material is never written as plaintext, printed, or passed on a command line.
+
+```powershell
+# Account A is currently logged in
+agy-account add personal
+
+# Log into Account B once with the normal Agy flow, then save it
+agy-account add work
+
+agy-account list
+agy-account switch personal
+
+# Automatic sticky failover is explicit opt-in
+agy-account enable --pool
+```
+
+The active healthy account remains selected until a definite quota or authentication failure.
+Polyphony then marks that account unavailable, safely switches to one eligible saved account,
+starts a new Agy process, and retries the interrupted call. It never round-robins requests or tries
+one account twice in a failover chain. Switching is blocked while another unrelated Agy worker is
+active, and credential drift is backed up before any overwrite. Disable automatic rotation with
+`agy-account disable --pool`; users without saved profiles keep the previous behavior unchanged.
+
+Quota caches and persistent Agy conversation IDs are isolated per account. If every enabled account
+is exhausted, the existing Sonnet-or-wait user decision remains the final fallback. Use only accounts
+you are authorized to operate and confirm that this workflow is allowed by the terms applicable to
+those accounts.
+
 ## Gemini quota control
 
 Polyphony tracks both Gemini quota windows (**5h** and **7d**). After a failed, empty, or timed-out
-call, it checks them immediately; if either is at **2% or less**, it pauses without switching
-models automatically.
+call, it checks them immediately. An explicitly enabled account pool tries another eligible Gemini
+account first; if the pool is absent or exhausted and either window is at **2% or less**, Polyphony
+pauses without switching models automatically.
 
 <p align="center">
   <img src="docs/gemini-quota-control.png" alt="Polyphony Gemini quota depleted decision dialog" width="760">

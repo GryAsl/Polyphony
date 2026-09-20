@@ -55,7 +55,9 @@ different parent or workspace. It serializes one task per subagent, renews the l
 and rotates to a fresh conversation only when an explicit resume failure is detected.
 Use the ordinary `delegate` tool for isolated work or when context reuse is undesirable.
 
-If a Gemini run fails, the wrapper checks both 5h and 7d quota windows. Either window at
+If a Gemini run fails, the wrapper checks both 5h and 7d quota windows. When the local account
+pool was explicitly enabled, a definite quota/auth failure first rotates to one eligible saved
+account and starts a fresh Agy process; it never retries an account twice. Either window at
 or below 2% is depleted and returns exit 10. Ask the user whether to kill stalled workers
 and continue with Claude Sonnet 4.6, or keep them alive and check both windows every 10
 minutes. Never select either path automatically. Record the explicit answer with

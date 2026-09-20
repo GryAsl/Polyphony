@@ -36,20 +36,44 @@ def _state_dir() -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".antigravity-quota"
 
 
-def _state_path() -> Path:
+def _accounts_root() -> Path:
+    configured = os.environ.get("POLYPHONY_ACCOUNTS_DIR") or os.environ.get("POLYPHONY_ACCOUNTS_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    if os.name == "nt" and (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")):
+        return Path(os.environ.get("LOCALAPPDATA") or os.environ["APPDATA"]) / "Polyphony" / "accounts"
+    return Path.home() / ".local" / "share" / "Polyphony" / "accounts"
+
+
+def _active_account() -> str | None:
+    try:
+        state = json.loads((_accounts_root() / "pool.json").read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or not state.get("pool_enabled"):
+            return None
+        alias = state.get("current")
+        return str(alias) if alias else None
+    except (OSError, ValueError):
+        return None
+
+
+def _state_path(account: str | None = None) -> Path:
+    if account:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", account):
+            raise ValueError("invalid account alias")
+        return _state_dir() / "accounts" / account / "state.json"
     return _state_dir() / "state.json"
 
 
-def _load_state() -> dict[str, Any]:
+def _load_state(account: str | None = None) -> dict[str, Any]:
     try:
-        value = json.loads(_state_path().read_text(encoding="utf-8"))
+        value = json.loads(_state_path(account).read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _write_state(state: dict[str, Any]) -> None:
-    path = _state_path()
+def _write_state(state: dict[str, Any], account: str | None = None) -> None:
+    path = _state_path(account)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix="state.", suffix=".tmp", dir=path.parent)
     try:
@@ -233,10 +257,11 @@ def _apply_measurement(
     return state, alerts
 
 
-def _payload(state: dict[str, Any], source: str, alerts: list[dict[str, Any]]) -> dict[str, Any]:
+def _payload(state: dict[str, Any], source: str, alerts: list[dict[str, Any]], account: str | None = None) -> dict[str, Any]:
     windows = state.get("windows") if isinstance(state.get("windows"), dict) else {}
     return {
         "status": "DEPLETED" if state.get("depleted") else "AVAILABLE",
+        "account_id": account,
         "source": source,
         "depletion_threshold": state.get("depletion_threshold", DEFAULT_DEPLETION_THRESHOLD),
         "gemini": {
@@ -315,16 +340,25 @@ def main() -> int:
     parser.add_argument("--input", help="Parse saved /usage output instead of calling Agy.")
     parser.add_argument("--decision", choices=("sonnet", "wait", "clear"))
     parser.add_argument("--mark-depleted", action="store_true")
+    parser.add_argument("--account", help="Read or update quota state for one saved account alias.")
+    parser.add_argument(
+        "--active-account",
+        action="store_true",
+        help="Use the currently active saved account (also the default when one exists).",
+    )
     args = parser.parse_args()
 
-    state = _load_state()
+    account = _active_account() if args.active_account or not args.account else None
+    if args.account:
+        account = args.account
+    state = _load_state(account)
     if args.decision:
         if args.decision != "clear" and not state.get("depleted"):
             print("agy-quota: no depleted quota state is awaiting a decision", file=sys.stderr)
             return 1
         state["decision"] = None if args.decision == "clear" else args.decision
-        _write_state(state)
-        payload = _payload(state, "state", [])
+        _write_state(state, account)
+        payload = _payload(state, "state", [], account)
         _emit(payload, args.json, args.alerts_only)
         # Recording an explicit user choice succeeded. A later quota check or
         # delegated Gemini call may still return 10 while the state is depleted.
@@ -338,21 +372,21 @@ def main() -> int:
         state["depletion_threshold"] = args.threshold
         state["depleted"] = True
         state["decision"] = state.get("decision") if state.get("decision") in {"sonnet", "wait"} else None
-        _write_state(state)
-        payload = _payload(state, "failure-signal", [])
+        _write_state(state, account)
+        payload = _payload(state, "failure-signal", [], account)
         _emit(payload, args.json, args.alerts_only)
         return 10
 
     source = "cache"
     alerts: list[dict[str, Any]] = []
     if not args.state_only and (args.force or args.input or not _fresh(state, args.max_age)):
-        lock_path = _state_dir() / "refresh.lock"
+        lock_path = _state_path(account).with_name("refresh.lock")
         lock_fd = _acquire_lock(lock_path)
         if lock_fd is None:
             deadline = time.time() + 20
             while time.time() < deadline:
                 time.sleep(0.25)
-                state = _load_state()
+                state = _load_state(account)
                 if _fresh(state, args.max_age):
                     break
             if not _fresh(state, args.max_age):
@@ -366,7 +400,7 @@ def main() -> int:
             try:
                 measured = _query_live(args.input)
                 state, alerts = _apply_measurement(state, measured, args.threshold)
-                _write_state(state)
+                _write_state(state, account)
                 source = "live"
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
                 print(f"agy-quota: {exc}", file=sys.stderr)
@@ -380,7 +414,7 @@ def main() -> int:
     if not state or not isinstance(state.get("windows"), dict):
         print("agy-quota: no cached quota state is available", file=sys.stderr)
         return 2
-    payload = _payload(state, source, alerts)
+    payload = _payload(state, source, alerts, account)
     _emit(payload, args.json, args.alerts_only)
     return 10 if state.get("depleted") else 0
 

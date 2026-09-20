@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.31.65 — Local Agy account pool and bounded failover
+
+- Add an opt-in, Windows-first local Agy account pool for already-authorized accounts. Saved
+  Credential Manager records are protected with the current Windows user's DPAPI key; secrets are
+  never emitted in JSON, process arguments, or repository state.
+- Make Gemini quota state and persistent Agy conversations account-aware. Runtime schema v1 data
+  migrates incrementally and legacy conversations are associated lazily with the first known account.
+- Add sticky, bounded quota/auth failover to `agy-delegate`: mark the failed account, switch under a
+  global lock, start a fresh Agy process, and try no account twice before returning to the existing
+  Sonnet-or-wait decision.
+- Add `agy-account`, a compact Codex `account` MCP tool, Claude account command documentation,
+  drift backups, active-worker switch protection, diagnostics, and focused offline coverage.
+
 ## 0.31.64 — PR #5 follow-up reliability fixes
 
 - Make Codex MCP `agy-job start` a first-class work-producing operation. Successful starts now

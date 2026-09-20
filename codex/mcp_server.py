@@ -28,6 +28,26 @@ SCRIPT_DIR = Path(
 ).resolve()
 
 
+def _account_state_path() -> Path:
+    configured = os.environ.get("POLYPHONY_ACCOUNTS_DIR") or os.environ.get("POLYPHONY_ACCOUNTS_ROOT")
+    if configured:
+        return Path(configured).expanduser() / "pool.json"
+    if os.name == "nt" and (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")):
+        return Path(os.environ.get("LOCALAPPDATA") or os.environ["APPDATA"]) / "Polyphony" / "accounts" / "pool.json"
+    return Path.home() / ".local" / "share" / "Polyphony" / "accounts" / "pool.json"
+
+
+def _active_account_id() -> str | None:
+    try:
+        state = json.loads(_account_state_path().read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or not state.get("pool_enabled"):
+            return None
+        value = state.get("current")
+        return str(value) if value else None
+    except (OSError, ValueError):
+        return None
+
+
 def _object(properties: dict[str, Any], required: list[str] | None = None) -> dict:
     schema: dict[str, Any] = {
         "type": "object",
@@ -154,6 +174,18 @@ TOOLS = [
         ),
     },
     {
+        "name": "account",
+        "description": "Manage the local, explicitly enabled Agy account pool. Credentials remain protected by the platform backend and are never returned.",
+        "inputSchema": _object(
+            {
+                "action": {"type": "string", "enum": ["add", "list", "current", "switch", "remove", "enable", "disable", "rotate", "doctor"]},
+                "alias": {"type": "string"},
+                "pool": {"type": "boolean", "description": "For enable/disable, target automatic pool rotation instead of one account."},
+            },
+            ["action"],
+        ),
+    },
+    {
         "name": "trace",
         "description": "Read or audit Agy execution traces through agy-trace.",
         "inputSchema": _object(
@@ -225,6 +257,7 @@ TOOLS = [
             "lease_seconds": {"type": "integer", "minimum": 1},
             "status": {"type": "string", "enum": ["completed", "failed", "cancelled"]},
             "checkpoint": {"type": "string"},
+            "account_id": {"type": "string"},
             "from_agent_id": {"type": "string"}, "to_agent_id": {"type": "string"},
             "max_hops": {"type": "integer", "minimum": 0},
         }, ["action"]),
@@ -406,12 +439,14 @@ def _persistent_delegate(args: dict) -> dict:
     heartbeat_thread: threading.Thread | None = None
     try:
         lease_seconds = int(args.get("lease_seconds") or 3600)
+        account_id = _active_account_id()
         claim = runtime.claim_task(
             parent, workspace, prompt,
             agent_id=args.get("agent_id"),
             parent_task_id=args.get("parent_task_id"),
             fresh_agent=bool(args.get("fresh_agent")),
             lease_seconds=lease_seconds,
+            account_id=account_id,
         )
 
         def heartbeat_loop() -> None:
@@ -443,7 +478,7 @@ def _persistent_delegate(args: dict) -> dict:
         )
         if resume_failed and receipt["exit_code"] != 0:
             checkpoint = str(claim.get("checkpoint") or "Previous conversation could not be resumed; treat repository state as authoritative.")
-            rotated = runtime.resume_fallback(claim["agent_id"], parent, workspace, checkpoint)
+            rotated = runtime.resume_fallback(claim["agent_id"], parent, workspace, checkpoint, account_id=account_id)
             claim["conversation_id"] = rotated["conversation_id"]
             claim["conversation_generation"] = rotated["conversation_generation"]
             claim["checkpoint"] = rotated["checkpoint"]
@@ -459,13 +494,18 @@ def _persistent_delegate(args: dict) -> dict:
             receipt = _run_shell("agy-delegate.sh", argv, workspace, delegated["prompt"])
             receipt["resume_fallback"] = True
         conversation = _conversation_from_stderr(receipt["stderr"])
+        final_account_id = _active_account_id()
+        final_generation = claim["conversation_generation"]
         if receipt["exit_code"] == 0 and receipt["stdout"].strip():
             if conversation:
-                runtime.set_conversation(claim["agent_id"], parent, workspace, conversation)
+                stored = runtime.set_conversation(
+                    claim["agent_id"], parent, workspace, conversation, account_id=final_account_id
+                )
+                final_generation = stored["conversation_generation"]
             runtime.finish_task(claim["task_id"], claim["lease_token"], "completed")
         else:
             runtime.finish_task(claim["task_id"], claim["lease_token"], "failed")
-        receipt["persistent"] = {"task_id": claim["task_id"], "agent_id": claim["agent_id"], "conversation_id": conversation or claim.get("conversation_id"), "conversation_generation": claim["conversation_generation"]}
+        receipt["persistent"] = {"task_id": claim["task_id"], "agent_id": claim["agent_id"], "account_id": final_account_id, "conversation_id": conversation or (claim.get("conversation_id") if final_account_id == account_id else None), "conversation_generation": final_generation}
         return receipt
     finally:
         heartbeat_stop.set()
@@ -572,6 +612,27 @@ def _dispatch(name: str, args: dict) -> dict:
             raise ValueError("quota action must be check, choose_sonnet, choose_wait, or clear")
         return _run_python("agy-quota.py", argv)
 
+    if name == "account":
+        action = str(args.get("action") or "")
+        if action not in {"add", "list", "current", "switch", "remove", "enable", "disable", "rotate", "doctor"}:
+            raise ValueError("unsupported account action")
+        argv = ["--json", action]
+        alias = str(args.get("alias") or "")
+        if action in {"switch", "remove"} and not alias:
+            raise ValueError(f"account {action} requires alias")
+        if action == "add" and alias:
+            argv.append(alias)
+        elif action in {"switch", "remove"}:
+            argv.append(alias)
+        elif action in {"enable", "disable"}:
+            if args.get("pool"):
+                argv.append("--pool")
+            elif alias:
+                argv.append(alias)
+            else:
+                raise ValueError(f"account {action} requires alias or pool=true")
+        return _run_python("agy_account.py", argv)
+
     if name == "trace":
         action = str(args.get("action") or "")
         target = args.get("target")
@@ -627,6 +688,7 @@ def _dispatch(name: str, args: dict) -> dict:
             for key, option in (("agent_id", "--agent"), ("parent_task_id", "--parent-task"), ("lease_seconds", "--lease")):
                 _flag(argv, args, key, option)
             _switch(argv, args, "fresh_agent", "--fresh-agent")
+            _flag(argv, args, "account_id", "--account")
         elif action == "heartbeat":
             argv = ["heartbeat", str(args.get("task_id") or ""), str(args.get("lease_token") or "")]
             _flag(argv, args, "lease_seconds", "--lease")
@@ -635,6 +697,7 @@ def _dispatch(name: str, args: dict) -> dict:
             _flag(argv, args, "status", "--status")
         elif action == "resume_fallback":
             argv = ["resume-fallback", "--agent", str(args.get("agent_id") or ""), "--parent", str(args.get("parent_agent_id") or ""), "--workspace", workspace, "--checkpoint", str(args.get("checkpoint") or "")]
+            _flag(argv, args, "account_id", "--account")
         elif action == "agents":
             argv = ["agents", "--workspace", workspace]
             _flag(argv, args, "parent_agent_id", "--parent")
@@ -715,7 +778,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.64"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.65"},
             },
         }
     if method == "notifications/initialized":

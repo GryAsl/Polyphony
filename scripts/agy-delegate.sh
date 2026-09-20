@@ -87,6 +87,9 @@ PROMPT_FROM_STDIN=0
 CONTINUE=0
 CONV_ID=""
 PRINT_CMD=0
+BASE_PROMPT=""
+ACCOUNT_WORKER_ID="${AGY_ACCOUNT_WORKER_ID:-polyphony-$$}"
+ACCOUNT_WORKER_REGISTERED=0
 
 die() { echo "agy-delegate: $*" >&2; exit 1; }
 # $1 = remaining argc ($#). Fail with a friendly message if an option has no value
@@ -234,6 +237,110 @@ quota_run() {
   return 2
 }
 
+# Account-pool calls use the same Python resolution as the Windows bridge. They
+# never receive credential bytes; the manager talks to Credential Manager itself.
+account_run() {
+  resolve_bridge_python || return 127
+  "${BRIDGE_PY[@]}" "$HERE/agy_account.py" --json "$@"
+}
+
+account_json_field() { # $1=json, $2=top-level key
+  local payload="$1" key="$2"
+  resolve_bridge_python || return 1
+  printf '%s' "$payload" | "${BRIDGE_PY[@]}" -c 'import json,sys; d=json.load(sys.stdin); v=d.get(sys.argv[1]); print((str(v).lower() if isinstance(v,bool) else v) if v is not None else "")' "$key" 2>/dev/null
+}
+
+account_pool_enabled() {
+  local pool_json enabled
+  set +e
+  pool_json="$(account_run list 2>/dev/null)"
+  set -e
+  enabled="$(account_json_field "$pool_json" pool_enabled 2>/dev/null || true)"
+  [ "$enabled" = true ]
+}
+
+account_retry_on_current() {
+  local tried="$1"; shift
+  local -a retry_args=(--model "$MODEL" --timeout "$TIMEOUT")
+  [ "$IDLE_TIMEOUT_EXPLICIT" -eq 0 ] || retry_args+=(--idle-timeout "$IDLE_TIMEOUT")
+  [ "$YOLO" -eq 0 ] || retry_args+=(--yolo)
+  [ "$SANDBOX" -eq 0 ] || retry_args+=(--sandbox)
+  [ "$DIGEST" -eq 0 ] || retry_args+=(--digest)
+  # Structured output is selected from the inherited plugin option and the
+  # child's own capability probe; --json is not a delegate-wrapper CLI flag.
+  [ -z "$MODE" ] || retry_args+=(--mode "$MODE")
+  for d in "${ADD_DIRS[@]:-}"; do [ -z "$d" ] || retry_args+=(--dir "$d"); done
+  # Conversation IDs and --continue are intentionally dropped: they belong to
+  # the prior account. The fresh invocation reports its own conversation ID.
+  printf '%s' "$BASE_PROMPT" | AGY_ACCOUNT_FAILOVER_TRIED="$tried" \
+    AGY_ACCOUNT_WORKER_ID="$ACCOUNT_WORKER_ID" "$HERE/agy-delegate.sh" "${retry_args[@]}" -
+}
+
+account_try_failover() { # $1=quota|auth; succeeds only by replacing this process result
+  [ "${AGY_QUOTA_PROBE:-0}" != 1 ] || return 1
+  is_gemini_model "$MODEL" || return 1
+  account_pool_enabled || return 1
+  local reason="$1" current_json current tried result rc next
+  set +e
+  current_json="$(account_run current 2>/dev/null)"; rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || return 1
+  current="$(account_json_field "$current_json" current || true)"
+  [ -n "$current" ] || return 1
+  tried="${AGY_ACCOUNT_FAILOVER_TRIED:-}"
+  case ",$tried," in *",$current,"*) return 1 ;; esac
+  tried="${tried:+$tried,}$current"
+  set +e
+  result="$(POLYPHONY_SWITCH_OWNER="$ACCOUNT_WORKER_ID" account_run rotate-after-failure "$current" --tried "$tried" --reason "$reason" 2>/dev/null)"; rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || return 1
+  next="$(account_json_field "$result" current || true)"
+  [ -n "$next" ] || return 1
+  printf 'AGY_ACCOUNT_FAILOVER {"from":"%s","to":"%s","reason":"%s"}\n' "$current" "$next" "$reason" >&2
+  account_unregister_worker
+  set +e
+  account_retry_on_current "$tried"
+  rc=$?
+  set -e
+  exit "$rc"
+}
+
+account_preflight() {
+  [ "${AGY_QUOTA_PROBE:-0}" != 1 ] || return 0
+  [ "$PRINT_CMD" -ne 1 ] || return 0
+  is_gemini_model "$MODEL" || return 0
+  local pool_json enabled
+  set +e
+  pool_json="$(account_run list 2>/dev/null)"
+  set -e
+  enabled="$(account_json_field "$pool_json" pool_enabled 2>/dev/null || true)"
+  [ "$enabled" = true ] || return 0
+  set +e
+  account_run ensure-active >/dev/null 2>&1
+  set -e
+  return 0
+}
+
+account_register_worker() {
+  [ "${AGY_QUOTA_PROBE:-0}" != 1 ] || return 0
+  is_gemini_model "$MODEL" || return 0
+  account_pool_enabled || return 0
+  local current_json current
+  set +e
+  current_json="$(account_run current 2>/dev/null)"
+  set -e
+  current="$(account_json_field "$current_json" current 2>/dev/null || true)"
+  [ -n "$current" ] || return 0
+  account_run worker-start "$ACCOUNT_WORKER_ID" --account "$current" >/dev/null 2>&1 || return 0
+  ACCOUNT_WORKER_REGISTERED=1
+}
+
+account_unregister_worker() {
+  [ "$ACCOUNT_WORKER_REGISTERED" -eq 1 ] || return 0
+  account_run worker-stop "$ACCOUNT_WORKER_ID" >/dev/null 2>&1 || true
+  ACCOUNT_WORKER_REGISTERED=0
+}
+
 quota_status_from() { printf '%s' "$1" | sed -n 's/^AGY_QUOTA .*"status":"\([^"]*\)".*/\1/p'; }
 quota_decision_from() { printf '%s' "$1" | sed -n 's/^AGY_QUOTA .*"decision":"\([^"]*\)".*/\1/p'; }
 
@@ -272,6 +379,7 @@ quota_preflight() {
   set -e
   status="$(quota_status_from "$quota_line")"
   [ "$status" = DEPLETED ] || return 0
+  account_try_failover quota || true
   decision="$(quota_decision_from "$quota_line")"
   case "$decision" in
     sonnet)
@@ -298,11 +406,15 @@ quota_failure_check() { # $1 = 1 for explicit quota diagnostic, otherwise 0
   quota_line="$(quota_run --force --json 2>/dev/null)"
   set -e
   status="$(quota_status_from "$quota_line")"
-  [ "$status" = DEPLETED ] && quota_decision_required "$quota_line"
+  if [ "$status" = DEPLETED ]; then
+    account_try_failover quota || true
+    quota_decision_required "$quota_line"
+  fi
   if [ "$explicit" = 1 ]; then
     set +e
     quota_line="$(quota_run --mark-depleted --json 2>/dev/null)"
     set -e
+    account_try_failover quota || true
     quota_decision_required "$quota_line"
   fi
   return 1
@@ -430,6 +542,7 @@ if [ "${AGY_REVIEW_DATA_PAYLOAD:-0}" != 1 ] || [ "${AGY_DELEGATE_READ_ONLY:-0}" 
   PROMPT_WORDS="$(printf '%s' "$PROMPT" | wc -w | tr -d '[:space:]')"
   [ "$PROMPT_WORDS" -lt 800 ] || die "prompt has ${PROMPT_WORDS} words. Rewrite/summarize to 200-500 words and always fewer than 800; count all pieces together. Files and stdin do not bypass this limit. Reference source paths or split genuinely independent tasks."
 fi
+BASE_PROMPT="$PROMPT"
 # --print-command is a dry run (introspection), so it doesn't require agy on PATH.
 # On Windows the bridge also honours AGY_PATH and agy's default install dirs.
 if [ "$PRINT_CMD" -ne 1 ] && ! command -v agy >/dev/null 2>&1 \
@@ -457,6 +570,7 @@ if [ -z "$MODEL" ]; then
   fi
 fi
 
+account_preflight
 quota_preflight
 
 # WSL gotcha: agy reads --add-dir over the /mnt/* Windows mount via a slow 9p bridge,
@@ -582,7 +696,7 @@ TO_CMD="$(timeout_cmd || true)"
 # it used to be cleaned by a trailing `rm -f`, which a SIGINT during the probe
 # skips. `rm -f ""` is a silent no-op, so the unset ones cost nothing.
 HELPF=""; ERR=""; OUTF=""; REQF=""; PROMPTF=""
-trap 'rm -f "$HELPF" "$ERR" "$OUTF" "$REQF" "$PROMPTF" 2>/dev/null' EXIT
+trap 'account_unregister_worker; rm -f "$HELPF" "$ERR" "$OUTF" "$REQF" "$PROMPTF" 2>/dev/null' EXIT
 
 JSON_MODE=0
 JSON_PY=()
@@ -634,6 +748,8 @@ if [ "$PRINT_CMD" -eq 1 ]; then
   { printf 'agy'; printf ' %q' "${ARGS[@]}" -p "$PROMPT"; printf '\n'; }
   exit 0
 fi
+
+account_register_worker
 
 # --- run (always detach stdin so non-TTY stdout is not dropped) ---
 # Per-invocation temp file for stderr (mktemp avoids the race + symlink risk of a
@@ -913,7 +1029,9 @@ $blob"
       signal CAPACITY_UNAVAILABLE "Gemini service has no capacity for the selected model; retry later or ask before changing models"
       exit 19 ;;
     *unauthenticated*|*unauthorized*|*"sign in"*|*"please authenticate"*|*reauth*)
-      shopt -u nocasematch; signal AUTH_REQUIRED "agy not authenticated — run \`agy\` once"; exit 11 ;;
+      shopt -u nocasematch
+      account_try_failover auth || true
+      signal AUTH_REQUIRED "agy not authenticated — run \`agy\` once"; exit 11 ;;
     *"timed out"*|*"deadline exceeded"*|*"print-timeout"*)
       shopt -u nocasematch; signal TIMEOUT "agy print-timeout / deadline exceeded"; exit 12 ;;
     *"invalid --model"*|*"is not recognized as a known model"*|*"not a known model"*)
