@@ -154,6 +154,10 @@ On native Windows, Polyphony can save the Agy login that already exists in Crede
 under `gemini:antigravity`. Saved records are encrypted for the current Windows user with DPAPI;
 OAuth material is never written as plaintext, printed, or passed on a command line.
 
+Starting Claude Code or Codex installs a small `agy-account.cmd` launcher into an existing
+user-owned PATH directory (normally `~/.local/bin` or Agy's own `bin` directory). The commands
+below therefore work directly in PowerShell and Command Prompt; Polyphony never edits PATH.
+
 ```powershell
 # Account A is currently logged in
 agy-account add personal

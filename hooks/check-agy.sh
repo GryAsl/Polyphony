@@ -6,6 +6,7 @@
 # call) so it doesn't slow every session start.
 #
 set -uo pipefail
+ROOT="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 
 on_windows_native() {
   case "${OSTYPE:-}" in msys*|cygwin*|win32) return 0 ;; esac
@@ -26,6 +27,19 @@ if ! agy_available; then
 fi
 
 if on_windows_native; then
+  # Make the account-pool command usable from ordinary PowerShell/cmd. Install
+  # only into a user-owned directory that is already on PATH; never edit PATH.
+  if [ -n "${AGY_BRIDGE_PYTHON:-}" ] && "$AGY_BRIDGE_PYTHON" -c 'import sys' >/dev/null 2>&1; then
+    "$AGY_BRIDGE_PYTHON" "$ROOT/scripts/install_windows_account_launcher.py" >/dev/null 2>&1 || \
+      echo "[antigravity] could not install the agy-account PowerShell launcher." >&2
+  elif command -v py >/dev/null 2>&1; then
+    py -3 "$ROOT/scripts/install_windows_account_launcher.py" >/dev/null 2>&1 || \
+      echo "[antigravity] could not install the agy-account PowerShell launcher." >&2
+  elif command -v python >/dev/null 2>&1; then
+    python "$ROOT/scripts/install_windows_account_launcher.py" >/dev/null 2>&1 || \
+      echo "[antigravity] could not install the agy-account PowerShell launcher." >&2
+  fi
+
   # Never launch agy directly from this headless hook: native Windows needs the
   # ConPTY adapter, and the full end-to-end check belongs to agy-doctor.
   VENDOR="$(cd "$(dirname "$0")/../vendor/agy-headless-bridge/src" 2>/dev/null && pwd)"

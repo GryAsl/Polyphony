@@ -78,6 +78,7 @@ run "account pool critical path" "${PY[@]}" "$ROOT/tests/test-account-pool.py" \
 run "account failover critical path" "${PY[@]}" "$ROOT/tests/test-account-failover.py" \
   AccountFailoverTests.test_explicit_quota_failure_rotates_and_retries_in_new_process
 fi
+run "Windows account launcher" "${PY[@]}" "$ROOT/tests/test-windows-account-launcher.py"
 run "agy rules installer" "$ROOT/tests/test-agy-rules-install.sh"
 
 run "manifest JSON" "${PY[@]}" - "$ROOT" <<'PY'
@@ -102,6 +103,7 @@ for script in \
   "$ROOT/scripts/agy-scout.sh" \
   "$ROOT/scripts/agy-review.sh" \
   "$ROOT/hooks/nudge-delegation.sh" \
+  "$ROOT/hooks/check-agy.sh" \
   "$ROOT/hooks/run-opportunity-hook.sh" \
   "$ROOT/bin/polyphony-agent"; do
   run "syntax: ${script#$ROOT/}" bash -n "$script"

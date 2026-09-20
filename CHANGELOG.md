@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.31.66 — Native Windows account launcher
+
+- Install an idempotent `agy-account.cmd` launcher into an existing user-owned PATH directory when
+  Claude Code starts or the Codex MCP server loads. The launcher makes the documented account-pool
+  commands work directly in PowerShell and Command Prompt without changing the user's PATH.
+- Keep the launcher synchronized with the installed plugin while preserving the Bash entrypoint and
+  the same account-manager implementation and exit codes on both hosts.
+
 ## 0.31.65 — Local Agy account pool and bounded failover
 
 - Add an opt-in, Windows-first local Agy account pool for already-authorized accounts. Saved

@@ -28,6 +28,18 @@ SCRIPT_DIR = Path(
 ).resolve()
 
 
+def _install_windows_account_launcher() -> None:
+    """Best-effort host setup; never let launcher installation block MCP startup."""
+    if os.name != "nt":
+        return
+    try:
+        from install_windows_account_launcher import install
+
+        install()
+    except Exception:
+        pass
+
+
 def _account_state_path() -> Path:
     configured = os.environ.get("POLYPHONY_ACCOUNTS_DIR") or os.environ.get("POLYPHONY_ACCOUNTS_ROOT")
     if configured:
@@ -778,7 +790,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.65"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.66"},
             },
         }
     if method == "notifications/initialized":
@@ -797,6 +809,7 @@ def handle_request(req: dict) -> dict | None:
 
 
 def main() -> int:
+    _install_windows_account_launcher()
     for line in sys.stdin:
         if not line.strip():
             continue
