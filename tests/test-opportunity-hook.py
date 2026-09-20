@@ -67,7 +67,10 @@ class OpportunityHookTests(unittest.TestCase):
         # A restored workspace preference is not an unanswered routing question.
         restored = str(uuid.uuid4())
         self.invoke({"hook_event_name": "SessionStart", "session_id": restored, "source": "startup"})
-        self.assertEqual(self.set_mode(restored, "2"), "")
+        numeric_out = self.set_mode(restored, "2")
+        numeric_context = json.loads(numeric_out)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("HARD Agy prompt gate", numeric_context)
+        self.assertNotIn("Switched Agy routing mode", numeric_context)
         out = self.invoke({"hook_event_name": "PreToolUse", "session_id": restored,
                            "tool_name": "Glob", "tool_input": {"pattern": "**/*"}})
         self.assertEqual(json.loads(out)["hookSpecificOutput"]["permissionDecision"], "deny")
