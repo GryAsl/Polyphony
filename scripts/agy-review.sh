@@ -70,7 +70,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 GOAL_WORDS="$(printf '%s' "$GOAL" | wc -w | tr -d '[:space:]')"
-[ "$GOAL_WORDS" -lt 800 ] || die "review goal must be fewer than 800 words; summarize to 200-500 words before retrying"
+[ "$GOAL_WORDS" -le 800 ] || die "review goal may contain at most 800 words; rewrite it to the shortest sufficient form, normally 200-500 words, and reference paths instead of pasting implementation detail"
 
 case "$TIER" in flash-medium|flash|pro) ;; *) die "--tier must be flash-medium, flash, or pro" ;; esac
 [ "$ADVERSARIAL" -eq 0 ] || [ "$TIER_EXPLICIT" -eq 1 ] || TIER="flash"

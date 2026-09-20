@@ -134,8 +134,11 @@ agy-account list
 ```
 
 Routine calls default to 30 minutes; use `--timeout 45m` or `--timeout 60m` for broad,
-build-heavy work. Keep authored prompts at 200–500 words and always below 800; use source paths
-instead of pasting code. The Windows idle timeout normally follows the hard deadline.
+build-heavy work. Keep authored worker contracts as short as the task permits, normally 200–500
+words and never more than 800 words and 8,000 characters; the upper bound is not a target. Use source
+paths instead of pasting code, diffs, logs, or long
+implementation plans. Files, stdin, and chunks do not bypass the gate. The Windows idle timeout
+normally follows the hard deadline.
 
 **Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. Host-only tools without equivalent Agy access remain advisory. Substantive discovery, implementation, review, tests and Git mutations still require Agy; a short command or the word `python` alone does not make substantive work exempt.
 

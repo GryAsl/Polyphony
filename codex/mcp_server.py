@@ -74,6 +74,15 @@ def _object(properties: dict[str, Any], required: list[str] | None = None) -> di
 TIER = {"type": "string", "enum": ["flash-medium", "flash", "pro"]}
 DURATION = {"type": "string", "description": "Wrapper duration such as 5m or 300s."}
 DIRECTORY = {"type": "string", "description": "Repository/workspace directory."}
+AGY_INSTRUCTIONS = {
+    "type": "string",
+    "maxLength": 8000,
+    "description": (
+        "Use the shortest sufficient worker contract, normally 200-500 words and never more than 800. "
+        "Include objective, paths/scope, non-negotiable constraints, acceptance checks, and the "
+        "requested compact receipt. Do not paste code/diffs/logs or split one oversized prompt."
+    ),
+}
 
 TOOLS = [
     {
@@ -81,7 +90,7 @@ TOOLS = [
         "description": "Run an Agy worker. Defaults to flash (High); flash-medium is an explicit option for clearly simple work. Both track the newest Flash family.",
         "inputSchema": _object(
             {
-                "prompt": {"type": "string"},
+                "prompt": AGY_INSTRUCTIONS,
                 "directory": DIRECTORY,
                 "add_dirs": {"type": "array", "items": {"type": "string"}},
                 "tier": TIER,
@@ -102,7 +111,7 @@ TOOLS = [
         "name": "scout",
         "description": "Run a compact read-only Gemini Flash scout. The shared delegate defaults to High; Medium is explicitly selectable.",
         "inputSchema": _object(
-            {"question": {"type": "string"}, "directory": DIRECTORY, "tier": {"type": "string", "enum": ["flash-medium", "flash"]}, "timeout": DURATION},
+            {"question": AGY_INSTRUCTIONS, "directory": DIRECTORY, "tier": {"type": "string", "enum": ["flash-medium", "flash"]}, "timeout": DURATION},
             ["question"],
         ),
     },
@@ -111,7 +120,7 @@ TOOLS = [
         "description": "Send a selected Git diff directly to a fresh compact Agy reviewer.",
         "inputSchema": _object(
             {
-                "goal": {"type": "string"},
+                "goal": AGY_INSTRUCTIONS,
                 "directory": DIRECTORY,
                 "scope": {
                     "type": "string",
@@ -131,7 +140,7 @@ TOOLS = [
         "description": "Run a compact, URL-bearing web research pass through agy-delegate.",
         "inputSchema": _object(
             {
-                "query": {"type": "string"},
+                "query": AGY_INSTRUCTIONS,
                 "tier": TIER,
                 "timeout": DURATION,
                 "yolo": {"type": "boolean", "description": "Defaults to true because headless web tools require permission."},
@@ -145,7 +154,7 @@ TOOLS = [
         "inputSchema": _object(
             {
                 "file": {"type": "string"},
-                "focus": {"type": "string"},
+                "focus": AGY_INSTRUCTIONS,
                 "output": {"type": "string"},
                 "convert": {"type": "boolean"},
                 "tier": TIER,
@@ -161,7 +170,7 @@ TOOLS = [
             {
                 "action": {"type": "string", "enum": ["start", "list", "status", "result", "cancel", "cancel_all"]},
                 "job_id": {"type": "string"},
-                "prompt": {"type": "string"},
+                "prompt": AGY_INSTRUCTIONS,
                 "directory": DIRECTORY,
                 "tier": TIER,
                 "timeout": DURATION,
@@ -250,7 +259,7 @@ TOOLS = [
         "description": "Run the existing token-volume cost comparison wrapper.",
         "inputSchema": _object(
             {
-                "prompt": {"type": "string"},
+                "prompt": AGY_INSTRUCTIONS,
                 "tier": TIER,
                 "yolo": {"type": "boolean"},
             },
@@ -278,7 +287,7 @@ TOOLS = [
         "name": "persistent_delegate",
         "description": "Run one Agy task through the existing delegate wrapper while safely reusing only the creating parent agent's persistent subagent conversation.",
         "inputSchema": _object({
-            "prompt": {"type": "string"}, "parent_agent_id": {"type": "string"}, "workspace": DIRECTORY,
+            "prompt": AGY_INSTRUCTIONS, "parent_agent_id": {"type": "string"}, "workspace": DIRECTORY,
             "agent_id": {"type": "string"}, "parent_task_id": {"type": "string"}, "fresh_agent": {"type": "boolean"},
             "tier": TIER, "model": {"type": "string"}, "timeout": DURATION, "idle_timeout": {"type": "number", "exclusiveMinimum": 0},
             "yolo": {"type": "boolean"}, "sandbox": {"type": "boolean"}, "digest": {"type": "boolean"}, "mode": {"type": "string", "enum": ["accept-edits", "plan"]},
@@ -529,8 +538,12 @@ def _persistent_delegate(args: dict) -> dict:
 def _dispatch(name: str, args: dict) -> dict:
     instructions = "\n".join(args[k] for k in ("prompt", "question", "query", "goal", "focus")
                              if isinstance(args.get(k), str))
-    if len(instructions.split()) >= 800:
-        raise ValueError("Agy instructions must be fewer than 800 words in total. Summarize to 200-500 words; do not bypass with files, stdin, or fragmented prompts.")
+    if len(instructions) > 8000 or len(instructions.split()) > 800:
+        raise ValueError(
+            "Agy instructions may use at most 800 words and 8,000 characters. Do not retry the "
+            "same draft in chunks: rewrite it to the shortest sufficient contract, normally 200-500 words, using only "
+            "objective, paths/scope, non-negotiable constraints, acceptance checks, and a compact receipt."
+        )
     if name == "delegate":
         argv = _delegate_args(args, include_prompt=False)
         argv.append("-")
@@ -790,7 +803,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.66"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.67"},
             },
         }
     if method == "notifications/initialized":

@@ -135,9 +135,21 @@ POLICY_FILES = {"claude.md", "agents.md"}
 # budget.  The character ceiling is authoritative (quotes, paths, and shell
 # escaping count too); the word ceiling gives agents a useful prompt-level
 # signal before a huge code dump reaches that limit. Authored instructions must
-# stay below 800 words even when assembled in a task file or delivered via stdin.
-DEFAULT_AGY_PROMPT_MAX_CHARS = 24000
-DEFAULT_AGY_PROMPT_MAX_WORDS = 799
+# stay at or below 800 words even when assembled in a task file or delivered via stdin.
+# The lower 200-500 word norm is injected before the agent drafts a tool
+# call; this hard boundary exists so a high-effort conductor cannot send a huge
+# contract and only discover the problem after shell parsing or model launch.
+DEFAULT_AGY_PROMPT_MAX_CHARS = 8000
+DEFAULT_AGY_PROMPT_MAX_WORDS = 800
+AGY_PROMPT_DISCIPLINE = (
+    "[Polyphony HARD Agy prompt gate] Before drafting any Agy/Gemini worker request, "
+    "use the shortest sufficient contract, normally 200-500 words; it may use at most 800 words "
+    "and 8,000 characters. The upper bound is not a target. Include only objective, relevant paths/scope, non-negotiable constraints, "
+    "acceptance checks, and the requested compact receipt. Do not paste code, diffs, logs, long "
+    "background, or a step-by-step implementation plan: the worker must inspect referenced files. "
+    "Never split or incrementally write one oversized prompt to evade the gate; use separate workers "
+    "only for genuinely independent outcomes."
+)
 
 # Strict is a routing guarantee for substantive work, not a blanket host lock.
 # Permit a very small, single-file conductor operation without Agy so the main
@@ -822,9 +834,10 @@ def _agy_prompt_budget_violation(tool_name: str, tool_input: dict) -> str | None
     return (
         "Agy prompt exceeds the compact instruction budget "
         f"({chars:,} chars/{words:,} words; limits {max_chars:,} chars/{max_words:,} words). "
-        "Rewrite and summarize before proceeding: aim for 200–500 words, always fewer than 800. "
-        "Count all chunks together. Files and stdin do not bypass this limit. "
-        "Use file paths instead of pasted code; split independent tasks only when useful."
+        "Do not retry the same draft in smaller chunks. Rewrite the complete contract to the "
+        "shortest sufficient form, normally 200-500 words and never more than 800 words/8,000 characters. Include only objective, paths/scope, "
+        "non-negotiable constraints, acceptance checks, and a compact receipt. Files, stdin, task "
+        "files, and multiple writes do not bypass the gate; split only genuinely independent work."
     )
 
 
@@ -1884,7 +1897,7 @@ def handle_session_start(data: dict, session_id: str) -> None:
     if os.environ.get("CLAUDE_PLUGIN_OPTION_CODING_POLICY", "on").lower() not in {"off", "false", "0", "no", "disabled"}:
         try:
             policy = json.loads(Path(__file__).with_name("policy-context.json").read_text(encoding="utf-8"))
-            shared_policy = policy["hookSpecificOutput"]["additionalContext"]
+            shared_policy = f"{AGY_PROMPT_DISCIPLINE}\n\n{policy['hookSpecificOutput']['additionalContext']}"
             update_context = "\n\n".join(filter(None, (shared_policy, update_context)))
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -1962,11 +1975,18 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
         context_to_emit = "[Agy routing] Could not save the requested session mode. Do not claim it changed; repair routing-state directory permissions."
 
     contexts = [value for value in (context_to_emit, _quota_context(), _polyphony_update_context()) if value]
+    if (state.get("mode") == "strict"
+            and os.environ.get("CLAUDE_PLUGIN_OPTION_CODING_POLICY", "on").lower().strip()
+            not in {"off", "false", "0", "no", "disabled"}):
+        # Strict mode is the path where every substantive turn may create an Agy
+        # request. Reinject immediately before the conductor drafts that request;
+        # SessionStart/compact injection remains the all-mode baseline.
+        contexts.insert(0, AGY_PROMPT_DISCIPLINE)
     if (state.get("mode") == "soft" and not context_to_emit
             and os.environ.get("CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE", "on").lower().strip() not in {"off", "false", "0", "no", "disabled"}
             and not any(token in str(prompt).lower() for token in ("antigravity", "agy-delegate", "agy-job"))
             and re.search(r"all files|every file|across the codebase|entire codebase|whole repo|migrat|generate tests|test coverage|exhaustive test|scaffold|boilerplate|deep research|web search|一括|全ファイル|すべてのファイル|網羅|移行|大量|横断|リポジトリ全体", str(prompt), re.I)):
-        contexts.append("[Polyphony] This looks suitable for one scoped Agy worker. Keep its prompt compact and use a digest receipt; delegate when appropriate. This soft-mode reminder is advisory.")
+        contexts.append(f"{AGY_PROMPT_DISCIPLINE} This soft-mode delegation reminder is advisory.")
     if contexts:
         _emit_context("UserPromptSubmit", "\n\n".join(contexts))
 

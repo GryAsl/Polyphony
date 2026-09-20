@@ -540,7 +540,7 @@ done
 # Only review's already-validated goal plus machine-generated diff payload is exempt.
 if [ "${AGY_REVIEW_DATA_PAYLOAD:-0}" != 1 ] || [ "${AGY_DELEGATE_READ_ONLY:-0}" != 1 ] || [ "$PROMPT_FROM_STDIN" -ne 1 ]; then
   PROMPT_WORDS="$(printf '%s' "$PROMPT" | wc -w | tr -d '[:space:]')"
-  [ "$PROMPT_WORDS" -lt 800 ] || die "prompt has ${PROMPT_WORDS} words. Rewrite/summarize to 200-500 words and always fewer than 800; count all pieces together. Files and stdin do not bypass this limit. Reference source paths or split genuinely independent tasks."
+  [ "$PROMPT_WORDS" -le 800 ] || die "prompt has ${PROMPT_WORDS} words. Do not retry it in chunks. Rewrite the complete contract to the shortest sufficient form, normally 200-500 words and never more than 800; include only objective, paths/scope, non-negotiable constraints, acceptance checks, and a compact receipt. Files, stdin, and multiple writes do not bypass this gate."
 fi
 BASE_PROMPT="$PROMPT"
 # --print-command is a dry run (introspection), so it doesn't require agy on PATH.
@@ -642,11 +642,12 @@ fi
 # The separate instruction-word check above applies to stdin too. This byte guard
 # only limits inline transport, after wrapper-owned instructions have been appended.
 if [ "$PROMPT_FROM_STDIN" -eq 0 ]; then
-  PROMPT_MAX_CHARS="${AGY_PROMPT_MAX_CHARS:-24000}"
-  case "$PROMPT_MAX_CHARS" in ''|*[!0-9]*|0) PROMPT_MAX_CHARS=24000 ;; esac
+  PROMPT_MAX_CHARS="${AGY_PROMPT_MAX_CHARS:-8000}"
+  case "$PROMPT_MAX_CHARS" in ''|*[!0-9]*|0) PROMPT_MAX_CHARS=8000 ;; esac
+  [ "$PROMPT_MAX_CHARS" -le 8000 ] || PROMPT_MAX_CHARS=8000
   PROMPT_CHARS="$(LC_ALL=C printf '%s' "$PROMPT" | wc -c | tr -d '[:space:]')"
   if [ "$PROMPT_CHARS" -gt "$PROMPT_MAX_CHARS" ]; then
-    die "inline prompt exceeds safe byte budget (${PROMPT_CHARS}; limit ${PROMPT_MAX_CHARS}). Use stdin for transport; the fewer-than-800-word instruction limit still applies."
+    die "inline prompt exceeds the compact contract budget (${PROMPT_CHARS}; limit ${PROMPT_MAX_CHARS}). Rewrite to the shortest sufficient form, normally 200-500 words, and reference source paths. Stdin, files, and chunks do not bypass the at-most-800-word authored-instruction gate."
   fi
 fi
 

@@ -1,6 +1,6 @@
 {
   "name": "antigravity",
-  "version": "0.31.66",
+  "version": "0.31.67",
   "description": "Polyphony: multi-model orchestration from Codex to Antigravity workers through tested shared wrappers.",
   "author": {
     "name": "GryAsl",

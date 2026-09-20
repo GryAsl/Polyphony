@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.31.67 — Compact Agy prompt enforcement
+
+- Put the compact worker-contract rule before routing guidance in both host skills and the shared
+  startup policy, then reinject it before strict-mode turns so high-effort conductors see it before
+  drafting an Agy request.
+- Keep 800 words as a hard upper bound rather than a target: prompts should use the shortest
+  sufficient contract, normally 200–500 words, with an inclusive 800-word ceiling and an 8,000-character ceiling.
+- Enforce the same limits in Claude hooks, Codex MCP schemas, MCP dispatch, delegate/review
+  wrappers, task files, and stdin. Oversized requests must be rewritten rather than split into
+  chunks that preserve unnecessary detail.
+
 ## 0.31.66 — Native Windows account launcher
 
 - Install an idempotent `agy-account.cmd` launcher into an existing user-owned PATH directory when

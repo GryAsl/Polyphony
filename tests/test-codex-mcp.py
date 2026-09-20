@@ -385,7 +385,7 @@ class McpAdapterTests(unittest.TestCase):
 
     def test_server_version_matches_manifests(self):
         response = mcp.handle_request({"id": 1, "method": "initialize", "params": {}})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.66")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.31.67")
         negotiated = mcp.handle_request({
             "id": 2,
             "method": "initialize",
@@ -394,7 +394,7 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(negotiated["result"]["protocolVersion"], mcp.PROTOCOL_VERSION)
         for manifest in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
             data = json.loads((ROOT / manifest).read_text(encoding="utf-8"))
-            self.assertEqual(data["version"], "0.31.66")
+            self.assertEqual(data["version"], "0.31.67")
 
     def test_exit_code_stdout_and_stderr_are_preserved(self):
         def failed(argv, **kwargs):

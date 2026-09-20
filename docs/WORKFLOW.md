@@ -7,8 +7,11 @@ authoritative; it does not require copying a private global configuration or ins
 
 Use one Flash worker end-to-end when the objective is clear and low risk, including small tasks,
 discovery, implementation, code-aware checks, diff review and authorized commit/push. Use a separate
-scout when the conductor needs evidence before it can scope, plan or answer. Keep instructions at
-200–500 words, strictly below 800, and reference source paths instead of pasted code.
+scout when the conductor needs evidence before it can scope, plan or answer. Keep instructions in
+the shortest sufficient form, normally 200–500 words and never more than 800 words and 8,000
+characters. Reference source paths instead of pasting code, diffs, logs, long background, or a
+step-by-step implementation plan. The upper bound is not a target. Prompt files, stdin, and chunks
+do not bypass the gate; split only genuinely independent outcomes.
 
 Read compact receipts, not full files, diffs or transcripts. A receipt states touched paths,
 checks and exit codes, concrete evidence, uncertainties and remaining gaps. Do not repeat clean

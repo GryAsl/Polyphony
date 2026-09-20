@@ -5,6 +5,14 @@ description: Delegate scoped repository work, scouting, review, research, media 
 
 # Polyphony — hybrid SDLC orchestration
 
+**HARD PROMPT GATE — apply before drafting a Bash/MCP call:** Use the shortest sufficient
+Agy/Gemini worker contract, normally **200–500 words**, and always keep the complete authored
+instructions at **most 800 words and 8,000 characters**. The upper bound is not a target. Use only: objective, relevant paths/scope, non-negotiable constraints,
+acceptance checks, and the requested compact receipt. Never paste code, diffs, logs, long
+background, or a step-by-step implementation plan; the worker must inspect referenced files.
+Never split or incrementally write one oversized prompt to evade the gate. Separate workers are
+appropriate only for genuinely independent outcomes. Hooks and wrappers reject violations.
+
 Run the **Antigravity CLI (`agy`, Gemini)** as a second AI working alongside Claude
 Code. The organizing idea is **intelligent model routing across the SDLC**: keep
 judgement-heavy work on Claude (the frontier model) and route deterministic,
@@ -45,7 +53,7 @@ rotates only on classified quota/auth failure, starts a fresh Agy process after 
 reuses an account-owned conversation ID under another account. If switching is blocked or every
 eligible account is exhausted, use the existing Sonnet-or-wait quota decision flow.
 
-**Compact task contracts (Claude and Codex, all effort levels):** Aim for 200–500 words and keep the total authored instructions strictly below 800 words. At 800 words, stop and summarize before launching or writing more. Count all pieces of the same prompt together; stdin, task files, and multiple writes are not exemptions. Reference paths and desired outcomes instead of pasting code or step-by-step implementation. Split genuinely independent tasks when useful; never split one oversized prompt merely to evade the cap. Wrapper-generated review diffs are source data and retain their separate size limit.
+**Compact task contracts (Claude and Codex, all effort levels):** The hard prompt gate above applies to every delegation surface. Count all pieces of one contract together; stdin, task files, and multiple writes are not exemptions. Wrapper-generated review diffs are source data and retain their separate size limit.
 
 **Strict-mode exceptions:** Tiny orchestration helpers (pure Python argument/text/arithmetic probes, working-directory or Git status/HEAD checks, temporary Agy prompt preparation) run locally. The host may also perform at most three bounded operations on one small file per turn (a small/chunked read, capped single-file grep, or one short non-sensitive replacement). Host-only tools without equivalent Agy access remain advisory. Broad discovery, implementation, review, tests and Git mutations still require Agy; command length or the word `python` alone does not make substantive work exempt.
 

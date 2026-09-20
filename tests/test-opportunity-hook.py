@@ -160,6 +160,8 @@ class OpportunityHookTests(unittest.TestCase):
         })
         data = json.loads(out)
         ctx = data["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("HARD Agy prompt gate", ctx)
+        self.assertIn("upper bound is not a target", ctx)
         self.assertIn("Soft routing is active", ctx)
         self.assertNotIn("unanswered", ctx)
 
@@ -463,7 +465,7 @@ class OpportunityHookTests(unittest.TestCase):
         """Inline Bash prompts must not reach the Windows shell size/quoting trap."""
         session = str(uuid.uuid4())
         self.set_mode(session, "Use Agy when appropriate (soft)")
-        prompt = "word " * 800
+        prompt = "word " * 801
         output = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": session,
@@ -475,8 +477,22 @@ class OpportunityHookTests(unittest.TestCase):
         self.assertEqual(hook.get("permissionDecision"), "deny")
         reason = hook.get("permissionDecisionReason", "")
         self.assertIn("compact instruction budget", reason)
-        self.assertIn("200–500 words", reason)
-        self.assertIn("stdin do not bypass", reason)
+        self.assertIn("200-500 words", reason)
+        self.assertIn("stdin", reason)
+        self.assertIn("do not bypass", reason)
+
+    def test_strict_user_turn_reinjects_prompt_discipline(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Always use Agy (strict)")
+        output = self.invoke({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "prompt": "Implement the requested feature.",
+        })
+        context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("HARD Agy prompt gate", context)
+        self.assertIn("at most 800 words", context)
+        self.assertIn("upper bound is not a target", context)
 
     # --- 5. Control-Plane Exemptions ---
 

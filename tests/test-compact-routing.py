@@ -26,22 +26,39 @@ mcp = load("compact_mcp", "codex/mcp_server.py")
 class CompactRoutingTests(unittest.TestCase):
     def test_budget_both_hosts_and_soft_mode(self):
         for tool, key in (("Bash", "command"), ("exec_command", "cmd")):
-            for count in (799, 800):
+            for count in (800, 801):
                 message = hook._agy_prompt_budget_violation(tool, {key: "agy-delegate '" + "word " * count + "'"})
-                self.assertEqual(bool(message), count == 800)
+                self.assertEqual(bool(message), count == 801)
         with patch.object(mcp, "_run_shell") as run:
             with self.assertRaises(ValueError):
-                mcp._dispatch("delegate", {"prompt": "word " * 800})
+                mcp._dispatch("delegate", {"prompt": "word " * 801})
             run.assert_not_called()
+
+    def test_character_budget_and_mcp_schema_are_consistent(self):
+        long_low_word_prompt = "x" * 8001
+        for tool, key in (("Bash", "command"), ("exec_command", "cmd")):
+            message = hook._agy_prompt_budget_violation(
+                tool, {key: "agy-delegate '" + long_low_word_prompt + "'"}
+            )
+            self.assertTrue(message)
+        with patch.object(mcp, "_run_shell") as run:
+            with self.assertRaises(ValueError):
+                mcp._dispatch("delegate", {"prompt": long_low_word_prompt})
+            run.assert_not_called()
+        delegate = next(tool for tool in mcp.TOOLS if tool["name"] == "delegate")
+        prompt_schema = delegate["inputSchema"]["properties"]["prompt"]
+        self.assertEqual(prompt_schema["maxLength"], 8000)
+        self.assertIn("shortest sufficient", prompt_schema["description"])
+        self.assertIn("never more than 800", prompt_schema["description"])
 
     def test_accumulated_prompt_file_and_powershell(self):
         with tempfile.TemporaryDirectory() as tmp:
             task = Path(tmp) / "agy_task_fixture.md"
             task.write_text("word " * 500, encoding="utf-8")
-            command = f"$p = '{task}'\nAdd-Content -Path $p -Encoding utf8 -Value @'\n" + "word " * 300 + "\n'@"
+            command = f"$p = '{task}'\nAdd-Content -Path $p -Encoding utf8 -Value @'\n" + "word " * 301 + "\n'@"
             self.assertTrue(hook._agy_prompt_budget_violation("Bash", {"command": command}))
             self.assertTrue(hook._agy_prompt_budget_violation("Edit", {
-                "file_path": str(task), "old_string": "word", "new_string": "word " * 301,
+                "file_path": str(task), "old_string": "word", "new_string": "word " * 302,
             }))
             command = command.replace("Add-Content", "Set-Content")
             self.assertIsNone(hook._agy_prompt_budget_violation("exec_command", {"cmd": command}))
@@ -78,10 +95,10 @@ class CompactRoutingTests(unittest.TestCase):
         if not bash:
             self.skipTest("Git Bash unavailable")
         # Dry-run rejects before model discovery or any real AGY invocation.
-        for count in (799, 800):
+        for count in (800, 801):
             result = subprocess.run([bash, "scripts/agy-delegate.sh", "--model", "Fixture", "--print-command", "-"],
                                     input="word " * count, text=True, capture_output=True, cwd=ROOT, timeout=10)
-            self.assertEqual(result.returncode, 0 if count == 799 else 1, result.stderr)
+            self.assertEqual(result.returncode, 0 if count == 800 else 1, result.stderr)
 
 
 if __name__ == "__main__":

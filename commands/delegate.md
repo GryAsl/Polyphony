@@ -8,6 +8,13 @@ following the `antigravity` skill's **Cost discipline** and **Verification gates
 
 Task: $ARGUMENTS
 
+Before writing the command, reduce the complete worker contract to the shortest sufficient form,
+normally **200–500 words**. It may use at most **800 words and 8,000 characters** across all
+chunks/files; the upper bound is not a target. Include only objective, paths,
+non-negotiable constraints, acceptance checks, and the requested compact receipt. Do not paste
+code/diffs/logs or prescribe a long implementation plan; let the worker inspect the repository.
+Never split one oversized prompt merely to bypass the gate.
+
 Do this:
 1. Default to `flash` (High). You may explicitly pick `flash-medium` for a clearly
    simple/routine/mechanical task when that is beneficial. Use High for complex reasoning,
