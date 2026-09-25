@@ -61,6 +61,7 @@ rc_label() {
     15) echo 'PERMISSION denied (soft on 1.1.3+, a hard error by 1.1.13) — add a permissions.allow rule, or --yolo' ;;
     16) echo 'Windows ConPTY bridge unavailable — check Python, vendored bridge, and pywinpty' ;;
     19) echo 'CAPACITY unavailable — selected Gemini model returned 503; retry later or ask before changing models' ;;
+    20) echo 'STREAM interrupted — transient Agy backend failure persisted after same-conversation retries; check partial edits' ;;
     *)  echo 'error' ;;
   esac
 }

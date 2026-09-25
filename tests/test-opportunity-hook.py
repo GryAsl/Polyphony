@@ -484,6 +484,43 @@ class OpportunityHookTests(unittest.TestCase):
         self.assertIn("stdin", reason)
         self.assertIn("do not bypass", reason)
 
+    def test_prompt_budget_ignores_commands_that_only_mention_a_wrapper(self):
+        """A long non-Agy command that names a wrapper path is not an Agy prompt."""
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Use Agy when appropriate (soft)")
+        body = "word " * 900
+        for cmd in (
+            "cd /tmp/polyphony && python patch.py scripts/agy-delegate.sh '" + body + "'",
+            "python - <<'EOF'\np='scripts/agy-delegate.sh'\n  \"$HERE/agy-delegate.sh\" x\n# " + body + "\nEOF",
+            "grep -n agy-delegate README.md # " + body,
+        ):
+            output = self.invoke({
+                "hook_event_name": "PreToolUse",
+                "session_id": session,
+                "tool_name": "Bash",
+                "tool_input": {"command": cmd},
+            })
+            if output:
+                hook = json.loads(output).get("hookSpecificOutput", {})
+                self.assertNotEqual(hook.get("permissionDecision"), "deny", cmd[:60])
+
+    def test_prompt_budget_still_catches_chained_wrapper_calls(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "Use Agy when appropriate (soft)")
+        prompt = "word " * 801
+        for cmd in (
+            "cd /repo && agy-delegate --tier flash '" + prompt + "'",
+            "X=1 /c/plugins/bin/agy-scout --dir . '" + prompt + "'",
+        ):
+            output = self.invoke({
+                "hook_event_name": "PreToolUse",
+                "session_id": session,
+                "tool_name": "Bash",
+                "tool_input": {"command": cmd},
+            })
+            hook = json.loads(output)["hookSpecificOutput"]
+            self.assertEqual(hook.get("permissionDecision"), "deny", cmd[:40])
+
     def test_strict_user_turn_reinjects_prompt_discipline(self):
         session = str(uuid.uuid4())
         self.set_mode(session, "Always use Agy (strict)")

@@ -598,14 +598,26 @@ def _limit(name: str, default: int) -> int:
         return default
 
 
+_HEREDOC_BODY = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?^\s*\2\s*$", re.DOTALL | re.MULTILINE)
+# A wrapper only counts when it is the EXECUTED command of some pipeline segment
+# (start of line, or after ; & | ( or $( ), optionally behind env assignments and a
+# path/quote. A mere mention -- `python patch.py scripts/agy-delegate.sh`, a grep for
+# the name, or a heredoc body that quotes wrapper source -- is not an Agy prompt.
+_AGY_COMMAND_POSITION = re.compile(
+    r"(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*[\"']?(?:[^\s;&|()\"']*[/\\])?"
+    r"agy(?:[-_](?:delegate|scout|review|job|media|quota|trace|doctor|migrate))?(?:\.sh|\.cmd|\.exe)?(?=[\s\"';&|)]|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
 def _looks_like_agy_invocation(tool_name: str, tool_input: dict) -> bool:
     lowered = tool_name.lower()
     if lowered.startswith("mcp__antigravity__"):
         return True
     if lowered not in SHELL_TOOL_NAMES:
         return False
-    command = _get_shell_command(tool_input) or ""
-    return bool(re.search(r"(?:^|[\s/])agy(?:[-_](?:delegate|scout|review|job|media|quota|trace|doctor|migrate))?\b", command, re.IGNORECASE))
+    command = _HEREDOC_BODY.sub("", _get_shell_command(tool_input) or "")
+    return bool(_AGY_COMMAND_POSITION.search(command))
 
 
 def _prompt_file_text(tool_name: str, tool_input: dict) -> str | None:

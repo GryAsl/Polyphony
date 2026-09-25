@@ -47,6 +47,9 @@
 #             |    (rc 1, "user denied permission"). Add a permissions.allow rule, or --yolo
 #             | 16 Windows ConPTY bridge/Python unavailable
 #             | 19 selected Gemini model has no server capacity (503)
+#             | 20 transient Agy backend/stream failure ("stream was interrupted",
+#             |    structured status INTERNAL/UNAVAILABLE) that persisted after the
+#             |    bounded same-conversation retries; check for partial edits
 #
 # On a classifiable failure, a machine-readable line is printed to stderr so
 # orchestrators (e.g. agy-job.sh) can react without scraping prose:
@@ -766,6 +769,7 @@ OUTF="$(mktemp "${TMPDIR:-/tmp}/agy-out.XXXXXX")"
 # agy-headless-bridge, whose ConPTY runner owns hard + idle timeouts in-process.
 TO_SECS="$(outer_timeout_secs "$TIMEOUT")"
 
+RUN_START_EPOCH="$(date +%s)"
 set +e
 if on_windows_native; then
   if [ "${#BRIDGE_PY[@]}" -eq 0 ] && ! resolve_bridge_python; then
@@ -913,8 +917,10 @@ PY
     OUT="$(cat "$RESP" 2>/dev/null)"
     printf 'AGY_USAGE %s\n' "$meta" >&2
     tee_usage "AGY_USAGE $meta"
-    # A structured ERROR is authoritative even if agy exited 0.
-    [ "$JSON_STATUS" = "ERROR" ] && [ "$RC" -eq 0 ] && RC=1
+    # Any structured status other than SUCCESS is authoritative even if agy exited 0:
+    # backend failures arrive as rc 0 + status INTERNAL + an empty response, which
+    # used to be misreported as "empty output" (exit 3) and never classified.
+    [ -n "$JSON_STATUS" ] && [ "$JSON_STATUS" != "SUCCESS" ] && [ "$RC" -eq 0 ] && RC=1
   fi
   rm -f "$RESP" "$JERR"
 fi
@@ -946,6 +952,95 @@ recover_empty_output() {
     # Keep large diff/scout payloads out of the Windows argv limit. The original
     # stdin has already been consumed, so replay the in-memory prompt explicitly.
     printf '%s' "$PROMPT" | AGY_EMPTY_RECOVERY=1 "$HERE/agy-delegate.sh" "${retry_args[@]}" -
+    return $?
+  fi
+  return 125
+}
+
+# Transient backend failures (the stream dropping mid-turn, structured INTERNAL /
+# UNAVAILABLE) are not quota, auth or capacity problems and usually clear within a
+# minute. agy retries a few times internally; when it still gives up, the wrapper
+# resumes the SAME conversation so a write task continues instead of restarting
+# (its context records which edits already landed). A fresh full replay is allowed
+# only for callers that declared the task read-only. Bounded by the delay list.
+is_transient_failure() { # $1 = diagnostics blob (never the model's response)
+  shopt -s nocasematch
+  case "$1" in
+    *"stream was interrupted"*|*"status=INTERNAL"*|*"status=UNAVAILABLE"*)
+      shopt -u nocasematch; return 0 ;;
+  esac
+  shopt -u nocasematch
+  return 1
+}
+
+# The structured envelope can omit conversation_id on a backend failure even though
+# agy already wrote a transcript. Find it: the one transcript started by this run
+# whose first user turn contains this prompt. Ambiguous or missing -> no id.
+find_conversation_for_prompt() {
+  local brain="${AGY_BRAIN_DIR:-$HOME/.gemini/antigravity-cli/brain}" prompt_file prompt_file_py
+  local -a py=()
+  if [ "${#JSON_PY[@]}" -gt 0 ]; then py=("${JSON_PY[@]}")
+  elif [ "${#BRIDGE_PY[@]}" -gt 0 ]; then py=("${BRIDGE_PY[@]}")
+  elif command -v python3 >/dev/null 2>&1; then py=(python3)
+  else return 0; fi
+  [ -d "$brain" ] || return 0
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/agy-conv-prompt.XXXXXX")"
+  printf '%s' "$PROMPT" >"$prompt_file"
+  prompt_file_py="$prompt_file"
+  # windows_path is a no-op without cygpath, and native Windows Python needs it with it.
+  brain="$(windows_path "$brain")"; prompt_file_py="$(windows_path "$prompt_file")"
+  "${py[@]}" - "$brain" "$prompt_file_py" "${RUN_START_EPOCH:-0}" <<'PY' 2>/dev/null || true
+import glob, json, os, sys
+brain, prompt_path, start = sys.argv[1], sys.argv[2], int(sys.argv[3] or 0)
+with open(prompt_path, encoding="utf-8") as fh:
+    head = " ".join(fh.read().split())[:400]
+if not head:
+    sys.exit(0)
+matches = []
+for path in glob.glob(os.path.join(brain, "*", ".system_generated", "logs", "transcript.jsonl")):
+    try:
+        if os.path.getmtime(path) < start - 5:
+            continue
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            first = json.loads(fh.readline(), strict=False)
+    except (OSError, ValueError):
+        continue
+    if isinstance(first, dict) and head in " ".join(str(first.get("content") or "").split()):
+        matches.append(path)
+if len(matches) == 1:
+    print(os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(matches[0])))))
+PY
+  rm -f "$prompt_file"
+}
+
+recover_transient_failure() {
+  local attempt="${AGY_TRANSIENT_ATTEMPT:-0}" delays="${AGY_TRANSIENT_RETRY_DELAYS:-20 60}" delay conv
+  local -a delay_list retry_args
+  read -r -a delay_list <<<"$delays"
+  [ "$attempt" -lt "${#delay_list[@]}" ] || return 125
+  delay="${delay_list[$attempt]}"
+  case "$delay" in (*[!0-9]*|'') delay=20 ;; esac
+  # A resumed call already knows its conversation even when the envelope omits it.
+  conv="${JSON_CONVERSATION:-${CONV_ID:-}}"
+  [ -n "$conv" ] || conv="$(find_conversation_for_prompt)"
+  retry_args=(--model "$MODEL" --timeout "$TIMEOUT")
+  [ "$IDLE_TIMEOUT_EXPLICIT" -eq 0 ] || retry_args+=(--idle-timeout "$IDLE_TIMEOUT")
+  [ "$YOLO" -eq 0 ] || retry_args+=(--yolo)
+  [ "$SANDBOX" -eq 0 ] || retry_args+=(--sandbox)
+  [ -z "$MODE" ] || retry_args+=(--mode "$MODE")
+  for d in "${ADD_DIRS[@]:-}"; do [ -z "$d" ] || retry_args+=(--dir "$d"); done
+  if [ -n "$conv" ]; then
+    echo "agy-delegate: transient Agy failure; resuming conversation $conv in ${delay}s (attempt $((attempt + 1))/${#delay_list[@]})" >&2
+    sleep "$delay"
+    AGY_TRANSIENT_ATTEMPT=$((attempt + 1)) "$HERE/agy-delegate.sh" "${retry_args[@]}" --conversation "$conv" \
+      "The previous turn was cut off by a transient Agy stream error. Continue the original task from where it stopped; do not redo completed work. Finish with the originally requested final receipt."
+    return $?
+  fi
+  if [ "${AGY_DELEGATE_READ_ONLY:-0}" = 1 ]; then
+    [ "$DIGEST" -eq 0 ] || retry_args+=(--digest)
+    echo "agy-delegate: transient Agy failure; replaying read-only task in ${delay}s (attempt $((attempt + 1))/${#delay_list[@]})" >&2
+    sleep "$delay"
+    printf '%s' "$PROMPT" | AGY_TRANSIENT_ATTEMPT=$((attempt + 1)) "$HERE/agy-delegate.sh" "${retry_args[@]}" -
     return $?
   fi
   return 125
@@ -996,6 +1091,8 @@ if [ $RC -ne 0 ]; then
   blob="$(cat "$ERR" 2>/dev/null)"
   [ -n "$JSON_ERROR" ] && blob="$JSON_ERROR
 $blob"
+  [ -n "$JSON_STATUS" ] && blob="status=$JSON_STATUS
+$blob"
   shopt -s nocasematch
   case "$blob" in
     *quota*|*"rate limit"*|*"resource exhausted"*)
@@ -1044,6 +1141,11 @@ $blob"
       signal MODEL_UNAVAILABLE "model not in \`agy models\` (check --model / tier remaps)"; exit 14 ;;
   esac
   shopt -u nocasematch
+  if is_transient_failure "$blob"; then
+    if recover_transient_failure; then exit 0; else recovery_rc=$?; [ "$recovery_rc" -eq 125 ] || exit "$recovery_rc"; fi
+    signal STREAM_INTERRUPTED "transient Agy backend/stream failure persisted after bounded retries; inspect partial edits (git status, agy-trace) before re-delegating"
+    exit 20
+  fi
   signal AGY_FAILED "agy exited $RC"
   exit 2
 fi

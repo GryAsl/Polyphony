@@ -803,7 +803,7 @@ def handle_request(req: dict) -> dict | None:
             "result": {
                 "protocolVersion": protocol_version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "polyphony", "version": "0.31.67"},
+                "serverInfo": {"name": "polyphony", "version": "0.31.68"},
             },
         }
     if method == "notifications/initialized":

@@ -17,7 +17,7 @@
 # and the command strings under tool_calls[].args.CommandLine.
 #
 # Usage:
-#   agy-trace.sh <conversationId | path/to/transcript.jsonl>   Pretty-print the steps
+#   agy-trace.sh [show] <conversationId | path/to/transcript.jsonl>   Pretty-print the steps
 #   agy-trace.sh --audit <conversationId | path | --last>      Step-type counts + failed commands
 #   agy-trace.sh --last                                        Pretty-print the most recent run
 #   agy-trace.sh --raw <conversationId | path>                 Raw JSONL (pipe to jq etc.)
@@ -44,6 +44,11 @@ else
   echo "agy-trace: Python 3 not found (set AGY_BRIDGE_PYTHON to its executable)" >&2
   exit 3
 fi
+
+# Transcripts hold arbitrary Unicode (e.g. Turkish prompts). On Windows, Python's
+# stdout defaults to the ANSI code page (cp1252) and print() crashed with
+# UnicodeEncodeError; force UTF-8 unless the caller chose an encoding.
+export PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}"
 
 die()   { echo "agy-trace: $*" >&2; exit 1; }
 usage() { sed -n '/^# Usage:/,/^# Exit codes:/p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
@@ -176,6 +181,9 @@ PY
 [ $# -ge 1 ] || die "no argument (pass a conversationId, a transcript path, or --list; -h for help)"
 case "$1" in
   -h|--help) usage ;;
+  show)      shift; [ $# -ge 1 ] || die "show needs a conversationId or path"
+             T="$(resolve "$1")" || exit $?
+             pretty "$T" ;;
   --list)    shift; list_recent "${1:-10}" ;;
   --last)    T="$(latest)" || exit $?
              pretty "$T" ;;

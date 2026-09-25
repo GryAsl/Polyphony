@@ -210,6 +210,84 @@ else
   bad "conversation-based empty-output recovery"
 fi
 
+# Transient backend failures: structured INTERNAL (rc 0, empty response, sometimes
+# no conversation_id) and "stream was interrupted" (rc 1). Bounded, same-conversation
+# recovery for writes; full replay only for read-only callers.
+TRANSIENT_BIN="$TMP/transient-bin"
+mkdir -p "$TRANSIENT_BIN"
+cat >"$TRANSIENT_BIN/agy" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" != "--help" ] || { printf '%s\n' '--output-format'; exit 0; }
+n=0; [ ! -f "$AGY_T_COUNTER" ] || n="$(cat "$AGY_T_COUNTER")"
+n=$((n + 1)); printf '%s' "$n" >"$AGY_T_COUNTER"
+printf '%s\n' "$*" >>"$AGY_T_ARGS"
+if [ "$n" -eq 1 ] && [ -n "${AGY_T_BRAIN:-}" ]; then
+  # Real agy writes the transcript even when the envelope omits conversation_id.
+  mkdir -p "$AGY_T_BRAIN/conv-found/.system_generated/logs"
+  printf '{"type":"USER_INPUT","content":"<USER_REQUEST> %s </USER_REQUEST>"}\n' "$AGY_T_PROMPT" \
+    >"$AGY_T_BRAIN/conv-found/.system_generated/logs/transcript.jsonl"
+fi
+if [ "$n" -le "${AGY_T_FAILS:-1}" ]; then
+  if [ "${AGY_T_KIND:-internal}" = stream ]; then
+    echo 'Error: The stream was interrupted. Please continue the task you were working on.' >&2
+    exit 1
+  fi
+  printf '%s\n' '{"status":"INTERNAL","error":"","response":"","conversation_id":"","usage":{}}'
+  exit 0
+fi
+printf '%s\n' '{"status":"SUCCESS","response":"DIGEST: finished after transient failure","conversation_id":"conv-found","usage":{}}'
+STUB
+chmod +x "$TRANSIENT_BIN/agy"
+
+run_transient() { # $1 = case name; remaining = extra env assignments
+  local name="$1"; shift
+  rm -f "$TMP/$name.counter" "$TMP/$name.args"
+  set +e
+  env PATH="$TRANSIENT_BIN:$EMPTY_BIN:$PATH" AGY_TEST_FORCE_POSIX=1 AGY_TRANSIENT_RETRY_DELAYS='0 0' \
+    AGY_T_COUNTER="$TMP/$name.counter" AGY_T_ARGS="$TMP/$name.args" "$@" \
+    >"$TMP/$name.out" 2>"$TMP/$name.err"
+  RC=$?
+  set -e
+  touch "$TMP/$name.args"
+}
+
+T_PROMPT='rename the fixture project everywhere'
+run_transient internal-write AGY_BRAIN_DIR="$TMP/brain1" AGY_T_BRAIN="$TMP/brain1" AGY_T_PROMPT="$T_PROMPT" \
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s "$T_PROMPT"
+if [ "$RC" -eq 0 ] && [ "$(cat "$TMP/internal-write.counter")" = 2 ] \
+  && has "$TMP/internal-write.args" '--conversation conv-found' \
+  && has "$TMP/internal-write.out" 'DIGEST: finished after transient failure'; then
+  ok "structured INTERNAL on a write task resumes the discovered conversation"
+else
+  bad "INTERNAL write-task recovery (rc=$RC)"
+fi
+
+run_transient stream-readonly AGY_T_KIND=stream AGY_DELEGATE_READ_ONLY=1 AGY_BRAIN_DIR="$TMP/brain-empty" \
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s 'inspect only'
+if [ "$RC" -eq 0 ] && [ "$(cat "$TMP/stream-readonly.counter")" = 2 ] \
+  && lacks "$TMP/stream-readonly.args" '--conversation'; then
+  ok "stream interruption on a read-only task replays once"
+else
+  bad "read-only stream recovery (rc=$RC)"
+fi
+
+run_transient stream-write AGY_T_KIND=stream AGY_BRAIN_DIR="$TMP/brain-empty" \
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s 'edit a file'
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/stream-write.counter")" = 1 ] \
+  && has "$TMP/stream-write.err" 'STREAM_INTERRUPTED'; then
+  ok "write task without a resumable conversation is never replayed (exit 20)"
+else
+  bad "write-task stream safety (rc=$RC)"
+fi
+
+run_transient internal-persistent AGY_T_FAILS=9 AGY_BRAIN_DIR="$TMP/brain2" AGY_T_BRAIN="$TMP/brain2" AGY_T_PROMPT="$T_PROMPT" \
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s "$T_PROMPT"
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/internal-persistent.counter")" = 3 ]; then
+  ok "persistent transient failure is bounded by the retry delay list"
+else
+  bad "bounded transient retries (rc=$RC, calls=$(cat "$TMP/internal-persistent.counter" 2>/dev/null))"
+fi
+
 # Sonnet 4.6 quota fallback must execute directly and prove completion. A textual
 # promise to delegate is not a successful work result even when agy itself exits 0.
 if "$DELEGATE_REAL" --model 'claude-sonnet-4-6' --print-command 'edit the fixture directly' \

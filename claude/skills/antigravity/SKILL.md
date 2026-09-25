@@ -192,7 +192,9 @@ boundary materially helps. Either way, *you* still own verification.
 **Structured failures and quota control.** A final Gemini `UNAVAILABLE (code 503): No capacity available`
 response is `CAPACITY_UNAVAILABLE` (exit 19) after agy's own bounded retries. Treat it as
 temporary service capacity, not account quota or an invalid model; retry later or ask
-before changing models. On a failed, empty, or timed-out Gemini run,
+before changing models. A dropped stream or structured `INTERNAL` status is retried by the
+wrapper in the same conversation; if it persists it exits `20` (`STREAM_INTERRUPTED`) and
+the conductor checks partial edits before re-delegating. On a failed, empty, or timed-out Gemini run,
 the wrapper force-checks both Agy Gemini quota windows. Either the 5h or 7d window at or
 below **2% remaining** is treated as depleted even when Agy has not reported an exact
 zero. It exits `10` with `QUOTA_DECISION_REQUIRED`; it never changes model automatically.

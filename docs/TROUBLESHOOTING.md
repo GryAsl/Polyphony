@@ -217,6 +217,7 @@ On classifiable failures the wrapper prints a machine-readable line to stderr:
 | 17 | one or more migration steps failed (`agy-migrate` only) | read the named steps; the run is still revertible with `agy-migrate --uninstall --apply` |
 | 18 | prerequisite missing (`agy-migrate` only) | no Claude Code config dir, or agy has never been run |
 | 19 | Gemini model capacity unavailable (`agy-delegate`) | agy exhausted its bounded 503 retries; retry later, or ask the user before changing models. This is not account quota and not an invalid model name. |
+| 20 | Transient Agy stream/backend failure (`agy-delegate`) | `The stream was interrupted` or a structured `INTERNAL`/`UNAVAILABLE` status survived the bounded retries (`AGY_TRANSIENT_RETRY_DELAYS`, default `20 60` seconds). Write tasks were resumed in the same conversation, never replayed from scratch; inspect `git status` and `agy-trace <conversationId>` for partial edits before re-delegating. |
 
 ---
 

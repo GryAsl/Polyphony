@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.31.68 — Transient stream recovery and Windows trace fixes
+
+- Treat every structured Agy status other than `SUCCESS` as a failure. A backend `INTERNAL`
+  with rc 0 and an empty response was misreported as empty output (exit 3) and never classified.
+- Classify `The stream was interrupted` and structured `INTERNAL`/`UNAVAILABLE` as transient.
+  `agy-delegate` now resumes the same conversation with bounded backoff
+  (`AGY_TRANSIENT_RETRY_DELAYS`, default `20 60`), recovering the conversation id from the
+  transcript when the envelope omits it. Read-only callers may replay; write tasks are never
+  restarted from scratch. A failure that persists exits `20` with `STREAM_INTERRUPTED`.
+- `agy-trace`: force UTF-8 output so non-ASCII transcripts no longer crash with
+  `UnicodeEncodeError` on Windows (cp1252), and accept `agy-trace show <id>`.
+- Prompt-budget hook: count a wrapper only when it is the executed command of a pipeline
+  segment. Commands that merely mention a wrapper path (patch scripts, greps, heredoc bodies)
+  were denied as oversized Agy prompts.
+
 ## 0.31.67 — Compact Agy prompt enforcement
 
 - Put the compact worker-contract rule before routing guidance in both host skills and the shared
