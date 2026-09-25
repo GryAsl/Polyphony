@@ -52,9 +52,18 @@ Force-push, history rewriting, tags/releases and unrelated changes need separate
 
 Soft is the default; strict gates substantive actions, not conversation. Host plugin/skill discovery,
 approved plugin updates, mode/quota/job management, clarification and bounded safe checks stay native.
-An explicit mode choice must be persisted before reporting success. No reset/reconnect should ask
-again. Do not treat a task launcher acknowledgement, exit 0 with empty evidence or nested unfinished
+Routing mode has one authoritative workspace control plane. For an explicit mode change in any
+language, call `routing_mode set` locally with the current workspace; never delegate or probe the
+request. If MCP is unavailable, use the equivalent local `agy-routing set strict|soft --directory
+<workspace>` command. Its verified receipt updates active sessions and future sessions without a restart. No
+reset/reconnect should ask again. Do not treat a task launcher acknowledgement, exit 0 with empty evidence or nested unfinished
 delegation as completion. Pending/failed workers remain pending/failed even when the host asks a question.
+
+Strict-mode classification is capability-based. `config/tool-capabilities.json` is the single source
+of truth for Polyphony shell and MCP tools: `work-producing` calls satisfy delegated work,
+`control-plane` and `read-only` calls remain locally available, and unknown tools/actions fail closed.
+Help and version introspection are recognized generically for every registered shell command. Add or
+change tool behavior in this registry instead of adding command-name exceptions to the hook.
 
 Use 30-minute hard timeouts for real work, 45–60 minutes for broad/build-heavy work, and short limits
 only for probes. Read failures explicitly; quota depletion requires the user's Sonnet-or-wait choice.

@@ -228,6 +228,13 @@ if [ "$n" -eq 1 ] && [ -n "${AGY_T_BRAIN:-}" ]; then
     >"$AGY_T_BRAIN/conv-found/.system_generated/logs/transcript.jsonl"
 fi
 if [ "$n" -le "${AGY_T_FAILS:-1}" ]; then
+  if [ "${AGY_T_SIGNAL:-0}" = 1 ]; then
+    echo 'Error: The stream was interrupted. Please continue the task you were working on.' >&2
+    exit 143
+  elif [ "${AGY_T_SIGNAL:-0}" = taskkill ]; then
+    echo 'Process terminated by taskkill; stream was interrupted.' >&2
+    exit 1
+  fi
   if [ "${AGY_T_KIND:-internal}" = stream ]; then
     echo 'Error: The stream was interrupted. Please continue the task you were working on.' >&2
     exit 1
@@ -253,7 +260,7 @@ run_transient() { # $1 = case name; remaining = extra env assignments
 
 T_PROMPT='rename the fixture project everywhere'
 run_transient internal-write AGY_BRAIN_DIR="$TMP/brain1" AGY_T_BRAIN="$TMP/brain1" AGY_T_PROMPT="$T_PROMPT" \
-  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s "$T_PROMPT"
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s "$T_PROMPT"
 if [ "$RC" -eq 0 ] && [ "$(cat "$TMP/internal-write.counter")" = 2 ] \
   && has "$TMP/internal-write.args" '--conversation conv-found' \
   && has "$TMP/internal-write.out" 'DIGEST: finished after transient failure'; then
@@ -263,7 +270,7 @@ else
 fi
 
 run_transient stream-readonly AGY_T_KIND=stream AGY_DELEGATE_READ_ONLY=1 AGY_BRAIN_DIR="$TMP/brain-empty" \
-  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s 'inspect only'
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s 'inspect only'
 if [ "$RC" -eq 0 ] && [ "$(cat "$TMP/stream-readonly.counter")" = 2 ] \
   && lacks "$TMP/stream-readonly.args" '--conversation'; then
   ok "stream interruption on a read-only task replays once"
@@ -272,7 +279,7 @@ else
 fi
 
 run_transient stream-write AGY_T_KIND=stream AGY_BRAIN_DIR="$TMP/brain-empty" \
-  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s 'edit a file'
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s 'edit a file'
 if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/stream-write.counter")" = 1 ] \
   && has "$TMP/stream-write.err" 'STREAM_INTERRUPTED'; then
   ok "write task without a resumable conversation is never replayed (exit 20)"
@@ -281,11 +288,60 @@ else
 fi
 
 run_transient internal-persistent AGY_T_FAILS=9 AGY_BRAIN_DIR="$TMP/brain2" AGY_T_BRAIN="$TMP/brain2" AGY_T_PROMPT="$T_PROMPT" \
-  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s "$T_PROMPT"
+  "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s "$T_PROMPT"
 if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/internal-persistent.counter")" = 3 ]; then
   ok "persistent transient failure is bounded by the retry delay list"
 else
   bad "bounded transient retries (rc=$RC, calls=$(cat "$TMP/internal-persistent.counter" 2>/dev/null))"
+fi
+
+run_transient retry-disabled AGY_T_FAILS=9 AGY_BRAIN_DIR="$TMP/brain-disabled" AGY_T_BRAIN="$TMP/brain-disabled" AGY_T_PROMPT="$T_PROMPT" \
+  AGY_TRANSIENT_RETRY_DELAYS='' "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s "$T_PROMPT"
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/retry-disabled.counter")" = 1 ]; then
+  ok "an explicitly empty transient retry list disables retries"
+else
+  bad "empty retry-list opt-out (rc=$RC, calls=$(cat "$TMP/retry-disabled.counter" 2>/dev/null))"
+fi
+
+run_transient retry-deadline AGY_T_FAILS=9 AGY_BRAIN_DIR="$TMP/brain-deadline" AGY_T_BRAIN="$TMP/brain-deadline" AGY_T_PROMPT="$T_PROMPT" \
+  AGY_TRANSIENT_RETRY_DELAYS='2' "$DELEGATE_REAL" --model 'Fixture Model' --timeout 1s "$T_PROMPT"
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/retry-deadline.counter")" = 1 ]; then
+  ok "transient backoff cannot exceed the original invocation deadline"
+else
+  bad "aggregate transient deadline (rc=$RC, calls=$(cat "$TMP/retry-deadline.counter" 2>/dev/null))"
+fi
+
+run_transient retry-cancelled AGY_T_SIGNAL=1 AGY_DELEGATE_READ_ONLY=1 AGY_BRAIN_DIR="$TMP/brain-cancelled" \
+  AGY_TRANSIENT_RETRY_DELAYS='0 0' "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s 'inspect only'
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/retry-cancelled.counter")" = 1 ]; then
+  ok "signal-terminated transient calls are never replayed"
+else
+  bad "cancelled-call replay guard (rc=$RC, calls=$(cat "$TMP/retry-cancelled.counter" 2>/dev/null))"
+fi
+
+run_transient retry-taskkill AGY_T_SIGNAL=taskkill AGY_DELEGATE_READ_ONLY=1 AGY_BRAIN_DIR="$TMP/brain-taskkill" \
+  AGY_TRANSIENT_RETRY_DELAYS='0 0' "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s 'inspect only'
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/retry-taskkill.counter")" = 1 ]; then
+  ok "generic taskkill diagnostics suppress read-only replay"
+else
+  bad "taskkill replay guard (rc=$RC, calls=$(cat "$TMP/retry-taskkill.counter" 2>/dev/null))"
+fi
+
+# If multiple recent transcripts contain the same request, no conversation can
+# be selected safely. Do not start another read-only worker that could duplicate
+# one already running remotely.
+AMBIGUOUS_BRAIN="$TMP/brain-ambiguous"
+for conv in existing-a existing-b; do
+  mkdir -p "$AMBIGUOUS_BRAIN/$conv/.system_generated/logs"
+  printf '{"type":"USER_INPUT","content":"<USER_REQUEST> %s </USER_REQUEST>"}\n' 'inspect only' \
+    >"$AMBIGUOUS_BRAIN/$conv/.system_generated/logs/transcript.jsonl"
+done
+run_transient retry-ambiguous AGY_T_KIND=stream AGY_DELEGATE_READ_ONLY=1 AGY_BRAIN_DIR="$AMBIGUOUS_BRAIN" \
+  AGY_TRANSIENT_RETRY_DELAYS='0 0' "$DELEGATE_REAL" --model 'Fixture Model' --timeout 30s 'inspect only'
+if [ "$RC" -eq 20 ] && [ "$(cat "$TMP/retry-ambiguous.counter")" = 1 ]; then
+  ok "ambiguous live transcript matches suppress read-only replay"
+else
+  bad "ambiguous transcript replay guard (rc=$RC, calls=$(cat "$TMP/retry-ambiguous.counter" 2>/dev/null))"
 fi
 
 # Sonnet 4.6 quota fallback must execute directly and prove completion. A textual

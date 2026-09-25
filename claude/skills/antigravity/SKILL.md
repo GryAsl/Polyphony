@@ -63,7 +63,12 @@ short 1–5 minute limits for health probes. Leave the Windows idle timeout deri
 hard deadline unless there is evidence of a true stall, so a quiet but progressing worker
 is not killed prematurely.
 
-**Manual mode switching:** Use "switch Agy mode to strict", "set Agy mode to soft" or "soft moda geç".
+**Manual mode switching:** When the user expresses an intent in any language to change routing mode,
+immediately call the local `routing_mode` MCP tool with `action=set`, the requested `strict` or
+`soft` mode, and the current workspace directory. If MCP is unavailable, run the equivalent local
+`agy-routing set strict|soft --directory <workspace>` control-plane command. Its verified receipt is authoritative immediately for the
+running session and future sessions. Never delegate, scout, inspect, or probe a mode switch, and
+never require a restart; acknowledge a successful receipt in one brief sentence.
 
 ## Two execution styles (pick per task)
 

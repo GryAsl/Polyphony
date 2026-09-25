@@ -219,6 +219,16 @@ On classifiable failures the wrapper prints a machine-readable line to stderr:
 | 19 | Gemini model capacity unavailable (`agy-delegate`) | agy exhausted its bounded 503 retries; retry later, or ask the user before changing models. This is not account quota and not an invalid model name. |
 | 20 | Transient Agy stream/backend failure (`agy-delegate`) | `The stream was interrupted` or a structured `INTERNAL`/`UNAVAILABLE` status survived the bounded retries (`AGY_TRANSIENT_RETRY_DELAYS`, default `20 60` seconds). Write tasks were resumed in the same conversation, never replayed from scratch; inspect `git status` and `agy-trace <conversationId>` for partial edits before re-delegating. |
 
+Transient retries share the original invocation's deadline. Set `AGY_TRANSIENT_RETRY_DELAYS` to
+an empty string to disable them. User-cancelled or signal-terminated work must not be replayed;
+when the conversation is unknown or transcript matches are ambiguous, inspect the existing worker
+and repository before starting another write task.
+
+For long-lived MCP work, use `persistent_delegate` with `action: "start"` and poll `status` or
+collect `result` with the same `job_id`, `parent_agent_id`, and workspace. A synchronous `run`
+may still hit the host's MCP request timeout. If a worker exits without a result, `result` reports
+failure rather than leaving a job indefinitely “running”. `cancel` terminates the worker tree.
+
 ---
 
 ## "tier model not in `agy models`" warning from doctor

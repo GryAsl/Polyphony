@@ -46,18 +46,27 @@ run "lean wrapper smoke tests" "$ROOT/tests/test-lean-wrappers.sh"
 else
 run "routing and host portability" "${PY[@]}" "$ROOT/tests/test-opportunity-hook.py" \
   OpportunityHookTests.test_session_start_initializes_soft_without_question \
+  OpportunityHookTests.test_authoritative_workspace_mode_updates_running_session \
   OpportunityHookTests.test_turkish_mode_switch_and_numeric_nonselection \
   OpportunityHookTests.test_strict_conversation_clarification_and_host_controls \
   OpportunityHookTests.test_mode_save_failure_never_claims_success \
   OpportunityHookTests.test_ask_user_question_result_persists_mode_before_next_tool \
   OpportunityHookTests.test_host_background_agy_result_is_pending_until_task_output \
+  OpportunityHookTests.test_persistent_async_start_is_pending_until_collected_result \
+  OpportunityHookTests.test_prompt_budget_ignores_commands_that_only_mention_a_wrapper \
   HookManifestPortabilityTests.test_session_start_compact_exclusion_and_fork_inclusion \
   HookManifestPortabilityTests.test_manifest_interpreter_commands_and_launcher_portability \
   HookManifestPortabilityTests.test_native_windows_launcher_carries_utf8_payload
+run "declarative tool capabilities" "${PY[@]}" "$ROOT/tests/test-tool-capabilities.py"
 run "MCP transport and version" "${PY[@]}" "$ROOT/tests/test-codex-mcp.py" \
   McpAdapterTests.test_server_version_matches_manifests \
+  McpAdapterTests.test_routing_mode_is_local_authoritative_control_plane \
   McpAdapterTests.test_stdin_backed_shell_call_does_not_pass_pipe_and_input_together \
-  McpAdapterTests.test_exit_code_stdout_and_stderr_are_preserved
+  McpAdapterTests.test_exit_code_stdout_and_stderr_are_preserved \
+  McpAdapterTests.test_persistent_delegate_async_job_can_be_collected \
+  McpAdapterTests.test_persistent_delegate_async_marks_dead_worker_failed_and_preserves_exit_code \
+  McpAdapterTests.test_persistent_delegate_completion_wins_cancel_race \
+  McpAdapterTests.test_persistent_delegate_async_files_are_private_and_request_is_consumed
 run "quota user-choice safeguard" "${PY[@]}" "$ROOT/tests/test-quota.py" \
   QuotaTests.test_either_decimal_window_at_or_below_two_is_depleted \
   QuotaTests.test_user_choice_persists_only_until_recovery

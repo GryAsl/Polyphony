@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Read or change Polyphony's authoritative workspace routing preference.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -n "${AGY_BRIDGE_PYTHON:-}" ] && "$AGY_BRIDGE_PYTHON" -c 'import sys' >/dev/null 2>&1; then
+  exec "$AGY_BRIDGE_PYTHON" "$ROOT/scripts/polyphony_routing.py" "$@"
+elif command -v python3 >/dev/null 2>&1 && python3 -c 'import sys' >/dev/null 2>&1; then
+  exec python3 "$ROOT/scripts/polyphony_routing.py" "$@"
+elif command -v py >/dev/null 2>&1 && py -3 -c 'import sys' >/dev/null 2>&1; then
+  exec py -3 "$ROOT/scripts/polyphony_routing.py" "$@"
+elif command -v python >/dev/null 2>&1 && python -c 'import sys' >/dev/null 2>&1; then
+  exec python "$ROOT/scripts/polyphony_routing.py" "$@"
+fi
+echo "agy-routing: Python 3 was not found" >&2
+exit 2

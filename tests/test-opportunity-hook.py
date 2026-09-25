@@ -44,7 +44,78 @@ class OpportunityHookTests(unittest.TestCase):
         self.assertTrue(module.is_work_producing_agy_call("mcp__antigravity__persistent_delegate", {}))
         self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__agent_task", {}))
         self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__agent_message", {}))
+        self.assertTrue(module.is_control_plane_exempt("mcp__antigravity__routing_mode", {"action": "set", "mode": "soft"}))
         self.assertTrue(module.is_control_plane_exempt("bash", {"command": "polyphony-agent agents"}))
+
+    def test_persistent_async_start_is_pending_until_collected_result(self):
+        session = str(uuid.uuid4())
+        self.set_mode(session, "strict")
+        self.invoke({
+            "hook_event_name": "UserPromptSubmit", "session_id": session,
+            "prompt": "Implement the requested change.",
+        })
+        self.invoke({
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "tool_name": "mcp__antigravity__persistent_delegate",
+            "tool_input": {"action": "start", "prompt": "Do the work", "parent_agent_id": "main"},
+            "tool_response": {"exit_code": 0, "structuredContent": {
+                "persistent_job": {"job_id": "abc123", "status": "running"}
+            }},
+        })
+        pending = json.loads(self.invoke({"hook_event_name": "Stop", "session_id": session}))
+        self.assertEqual(pending["decision"], "block")
+        self.assertIn("abc123", pending["reason"])
+        self.invoke({
+            "hook_event_name": "PostToolUse", "session_id": session,
+            "tool_name": "mcp__antigravity__persistent_delegate",
+            "tool_input": {"action": "result", "job_id": "abc123"},
+            "tool_response": {"exit_code": 0, "structuredContent": {
+                "persistent_job": {"job_id": "abc123", "status": "completed", "result": {
+                    "exit_code": 0, "stdout": "Implemented and verified.", "stderr": ""
+                }}
+            }},
+        })
+        self.assertEqual(self.invoke({"hook_event_name": "Stop", "session_id": session}), "")
+
+    def test_authoritative_workspace_mode_updates_running_session(self):
+        workspace = Path(self.temp.name) / "workspace"
+        workspace.mkdir()
+        (workspace / ".git").mkdir()
+        session = str(uuid.uuid4())
+        strict_out = self.invoke({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "cwd": str(workspace),
+            "prompt": "strict",
+        })
+        self.assertIn("Switched Agy routing mode to strict", strict_out)
+
+        changed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "polyphony_routing.py"),
+             "set", "soft", "--directory", str(workspace)],
+            env=self.env,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        self.assertEqual(json.loads(changed.stdout)["mode"], "soft")
+
+        tool_out = self.invoke({
+            "hook_event_name": "PreToolUse",
+            "session_id": session,
+            "cwd": str(workspace),
+            "tool_name": "Glob",
+            "tool_input": {"pattern": "**/*"},
+        })
+        self.assertNotIn("permissionDecision", json.loads(tool_out)["hookSpecificOutput"])
+        self.assertEqual(self.invoke({
+            "hook_event_name": "Stop",
+            "session_id": session,
+            "cwd": str(workspace),
+        }), "")
 
     def test_turkish_mode_switch_and_numeric_nonselection(self):
         session = str(uuid.uuid4())
@@ -145,12 +216,15 @@ class OpportunityHookTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def set_mode(self, session_id: str, choice: str) -> str:
-        return self.invoke({
+    def set_mode(self, session_id: str, choice: str, cwd: Path | None = None) -> str:
+        payload = {
             "hook_event_name": "UserPromptSubmit",
             "session_id": session_id,
             "prompt": choice,
-        })
+        }
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        return self.invoke(payload)
 
     # --- 1. SessionStart / Pending Default ---
 
@@ -530,6 +604,8 @@ class OpportunityHookTests(unittest.TestCase):
             "prompt": "Implement the requested feature.",
         })
         context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Polyphony routing control", context)
+        self.assertIn("do not delegate it", context)
         self.assertIn("HARD Agy prompt gate", context)
         self.assertIn("at most 800 words", context)
         self.assertIn("upper bound is not a target", context)
@@ -546,6 +622,7 @@ class OpportunityHookTests(unittest.TestCase):
             ("Read", {"file_path": "CLAUDE.md"}),
             ("exec_command", {"cmd": "agy-quota --force"}),
             ("exec_command", {"cmd": "agy-account current"}),
+            ("exec_command", {"cmd": "agy-routing --help"}),
             ("exec_command", {"cmd": "agy-doctor"}),
             ("exec_command", {"cmd": "agy-trace"}),
             ("exec_command", {"cmd": "agy-job list"}),
@@ -945,14 +1022,20 @@ class OpportunityHookTests(unittest.TestCase):
     def test_independent_session_and_turn_state(self):
         sess_a = str(uuid.uuid4())
         sess_b = str(uuid.uuid4())
+        workspace_a = Path(self.temp.name, "workspace-a")
+        workspace_b = Path(self.temp.name, "workspace-b")
+        for workspace in (workspace_a, workspace_b):
+            workspace.mkdir()
+            (workspace / ".git").mkdir()
 
-        self.set_mode(sess_a, "Always use Agy (strict)")
-        self.set_mode(sess_b, "Use Agy when appropriate (soft)")
+        self.set_mode(sess_a, "Always use Agy (strict)", workspace_a)
+        self.set_mode(sess_b, "Use Agy when appropriate (soft)", workspace_b)
 
         # sess_a is strict
         out_a = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": sess_a,
+            "cwd": str(workspace_a),
             "tool_name": "Read",
             "tool_input": {"file_path": "src/app.py"},
         })
@@ -962,6 +1045,7 @@ class OpportunityHookTests(unittest.TestCase):
         out_b = self.invoke({
             "hook_event_name": "PreToolUse",
             "session_id": sess_b,
+            "cwd": str(workspace_b),
             "tool_name": "Read",
             "tool_input": {"file_path": "src/app.py"},
         })

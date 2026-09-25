@@ -770,6 +770,13 @@ OUTF="$(mktemp "${TMPDIR:-/tmp}/agy-out.XXXXXX")"
 TO_SECS="$(outer_timeout_secs "$TIMEOUT")"
 
 RUN_START_EPOCH="$(date +%s)"
+# A transient retry belongs to the original invocation's wall-clock budget. Pass
+# this absolute deadline through recursive wrapper calls so retries cannot each
+# receive a fresh copy of --timeout.
+if [ -z "${AGY_TRANSIENT_DEADLINE_EPOCH:-}" ]; then
+  AGY_TRANSIENT_DEADLINE_EPOCH=$(( RUN_START_EPOCH + $(duration_secs "$TIMEOUT") ))
+fi
+export AGY_TRANSIENT_DEADLINE_EPOCH
 set +e
 if on_windows_native; then
   if [ "${#BRIDGE_PY[@]}" -eq 0 ] && ! resolve_bridge_python; then
@@ -977,7 +984,7 @@ is_transient_failure() { # $1 = diagnostics blob (never the model's response)
 # agy already wrote a transcript. Find it: the one transcript started by this run
 # whose first user turn contains this prompt. Ambiguous or missing -> no id.
 find_conversation_for_prompt() {
-  local brain="${AGY_BRAIN_DIR:-$HOME/.gemini/antigravity-cli/brain}" prompt_file prompt_file_py
+  local brain="${AGY_BRAIN_DIR:-$HOME/.gemini/antigravity-cli/brain}" prompt_file prompt_file_py found
   local -a py=()
   if [ "${#JSON_PY[@]}" -gt 0 ]; then py=("${JSON_PY[@]}")
   elif [ "${#BRIDGE_PY[@]}" -gt 0 ]; then py=("${BRIDGE_PY[@]}")
@@ -989,7 +996,7 @@ find_conversation_for_prompt() {
   prompt_file_py="$prompt_file"
   # windows_path is a no-op without cygpath, and native Windows Python needs it with it.
   brain="$(windows_path "$brain")"; prompt_file_py="$(windows_path "$prompt_file")"
-  "${py[@]}" - "$brain" "$prompt_file_py" "${RUN_START_EPOCH:-0}" <<'PY' 2>/dev/null || true
+  found="$("${py[@]}" - "$brain" "$prompt_file_py" "${RUN_START_EPOCH:-0}" <<'PY' 2>/dev/null || true
 import glob, json, os, sys
 brain, prompt_path, start = sys.argv[1], sys.argv[2], int(sys.argv[3] or 0)
 with open(prompt_path, encoding="utf-8") as fh:
@@ -1009,37 +1016,78 @@ for path in glob.glob(os.path.join(brain, "*", ".system_generated", "logs", "tra
         matches.append(path)
 if len(matches) == 1:
     print(os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(matches[0])))))
+elif len(matches) > 1:
+    print("AMBIGUOUS:" + str(len(matches)))
 PY
+  )"
   rm -f "$prompt_file"
+  printf '%s\n' "$found"
 }
 
 recover_transient_failure() {
-  local attempt="${AGY_TRANSIENT_ATTEMPT:-0}" delays="${AGY_TRANSIENT_RETRY_DELAYS:-20 60}" delay conv
+  local attempt="${AGY_TRANSIENT_ATTEMPT:-0}" delays delay conv now remaining deadline
   local -a delay_list retry_args
+  # An explicitly empty list disables retries. The :- form would incorrectly
+  # replace the empty value with defaults.
+  if [ "${AGY_TRANSIENT_RETRY_DELAYS+x}" = x ]; then
+    delays="$AGY_TRANSIENT_RETRY_DELAYS"
+  else
+    delays='20 60'
+  fi
   read -r -a delay_list <<<"$delays"
   [ "$attempt" -lt "${#delay_list[@]}" ] || return 125
+  # A signal exit is ambiguous (notably taskkill on Windows can surface as a
+  # generic process exit). Never replay after a signal-like exit: the remote
+  # worker may still be running, and a write must not be duplicated.
+  if [ "$RC" -ge 128 ] && [ "$RC" -le 255 ]; then return 125; fi
+  local failure_diag
+  failure_diag="$(cat "$ERR" 2>/dev/null) $JSON_ERROR"
+  shopt -s nocasematch
+  case "$failure_diag" in
+    *taskkill*|*"terminated by user"*|*"killed by user"*|*"operation was aborted"*|\
+    *"operation canceled"*|*"operation cancelled"*|*cancelled*|*canceled*|*"ctrl+c"*|*sigterm*|*sigkill*)
+      shopt -u nocasematch; return 125 ;;
+  esac
+  shopt -u nocasematch
   delay="${delay_list[$attempt]}"
   case "$delay" in (*[!0-9]*|'') delay=20 ;; esac
+  deadline="${AGY_TRANSIENT_DEADLINE_EPOCH:-0}"
+  case "$deadline" in (*[!0-9]*|'') deadline=0 ;; esac
+  now="$(date +%s)"
+  remaining=$(( deadline - now ))
+  [ "$remaining" -gt 0 ] || return 125
+  [ "$delay" -lt "$remaining" ] || return 125
+  sleep "$delay"
+  now="$(date +%s)"
+  remaining=$(( deadline - now ))
+  [ "$remaining" -gt 0 ] || return 125
   # A resumed call already knows its conversation even when the envelope omits it.
   conv="${JSON_CONVERSATION:-${CONV_ID:-}}"
-  [ -n "$conv" ] || conv="$(find_conversation_for_prompt)"
-  retry_args=(--model "$MODEL" --timeout "$TIMEOUT")
+  AGY_TRANSIENT_AMBIGUOUS=0
+  if [ -z "$conv" ]; then
+    conv="$(find_conversation_for_prompt)"
+    case "$conv" in AMBIGUOUS:*) AGY_TRANSIENT_AMBIGUOUS=1; conv="" ;; esac
+  fi
+  retry_args=(--model "$MODEL" --timeout "${remaining}s")
   [ "$IDLE_TIMEOUT_EXPLICIT" -eq 0 ] || retry_args+=(--idle-timeout "$IDLE_TIMEOUT")
   [ "$YOLO" -eq 0 ] || retry_args+=(--yolo)
   [ "$SANDBOX" -eq 0 ] || retry_args+=(--sandbox)
   [ -z "$MODE" ] || retry_args+=(--mode "$MODE")
   for d in "${ADD_DIRS[@]:-}"; do [ -z "$d" ] || retry_args+=(--dir "$d"); done
   if [ -n "$conv" ]; then
-    echo "agy-delegate: transient Agy failure; resuming conversation $conv in ${delay}s (attempt $((attempt + 1))/${#delay_list[@]})" >&2
-    sleep "$delay"
+    echo "agy-delegate: transient Agy failure; resuming conversation $conv (attempt $((attempt + 1))/${#delay_list[@]}, ${remaining}s remain)" >&2
     AGY_TRANSIENT_ATTEMPT=$((attempt + 1)) "$HERE/agy-delegate.sh" "${retry_args[@]}" --conversation "$conv" \
       "The previous turn was cut off by a transient Agy stream error. Continue the original task from where it stopped; do not redo completed work. Finish with the originally requested final receipt."
     return $?
   fi
-  if [ "${AGY_DELEGATE_READ_ONLY:-0}" = 1 ]; then
+  if [ "${AGY_DELEGATE_READ_ONLY:-0}" = 1 ] && [ "$AGY_TRANSIENT_AMBIGUOUS" -eq 0 ]; then
+    # Native Windows process termination can collapse taskkill and a genuine
+    # backend failure into the same child exit/error. Without a transcript ID,
+    # fail closed instead of creating another conversation that could overlap a
+    # still-live remote worker.
+    if on_windows_native; then return 125; fi
     [ "$DIGEST" -eq 0 ] || retry_args+=(--digest)
-    echo "agy-delegate: transient Agy failure; replaying read-only task in ${delay}s (attempt $((attempt + 1))/${#delay_list[@]})" >&2
-    sleep "$delay"
+    echo "agy-delegate: transient Agy failure; replaying read-only task (attempt $((attempt + 1))/${#delay_list[@]}, ${remaining}s remain)" >&2
     printf '%s' "$PROMPT" | AGY_TRANSIENT_ATTEMPT=$((attempt + 1)) "$HERE/agy-delegate.sh" "${retry_args[@]}" -
     return $?
   fi

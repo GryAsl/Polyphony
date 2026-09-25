@@ -7,14 +7,18 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 RUNTIME = Path(__file__).resolve().parents[1] / "scripts" / "polyphony_runtime.py"
 sys.path.insert(0, str(RUNTIME.parent))
 from polyphony_runtime import Runtime, RuntimeErrorBase, canonical_workspace  # noqa: E402
+from polyphony_routing import get_mode as get_routing_mode, set_mode as set_routing_mode  # noqa: E402
+from polyphony_capabilities import registered_mcp_tools  # noqa: E402
 
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -85,6 +89,18 @@ AGY_INSTRUCTIONS = {
 }
 
 TOOLS = [
+    {
+        "name": "routing_mode",
+        "description": "LOCAL CONTROL PLANE. When the user asks in any language to change Agy strict/soft routing, call this tool immediately. Never delegate a mode change to an Agy worker and never require a restart. The workspace preference is authoritative for the current session and future sessions.",
+        "inputSchema": _object(
+            {
+                "action": {"type": "string", "enum": ["get", "set"]},
+                "mode": {"type": "string", "enum": ["strict", "soft"]},
+                "directory": DIRECTORY,
+            },
+            ["action", "directory"],
+        ),
+    },
     {
         "name": "delegate",
         "description": "Run an Agy worker. Defaults to flash (High); flash-medium is an explicit option for clearly simple work. Both track the newest Flash family.",
@@ -285,14 +301,15 @@ TOOLS = [
     },
     {
         "name": "persistent_delegate",
-        "description": "Run one Agy task through the existing delegate wrapper while safely reusing only the creating parent agent's persistent subagent conversation.",
+        "description": "Run one Agy task through the existing delegate wrapper while safely reusing only the creating parent agent's persistent subagent conversation. Use action=start for long tasks, then status/result/cancel with the returned job_id and the same parent_agent_id/workspace; jobs survive MCP request timeouts and can be collected later.",
         "inputSchema": _object({
+            "action": {"type": "string", "enum": ["run", "start", "status", "result", "cancel"]}, "job_id": {"type": "string"},
             "prompt": AGY_INSTRUCTIONS, "parent_agent_id": {"type": "string"}, "workspace": DIRECTORY,
             "agent_id": {"type": "string"}, "parent_task_id": {"type": "string"}, "fresh_agent": {"type": "boolean"},
             "tier": TIER, "model": {"type": "string"}, "timeout": DURATION, "idle_timeout": {"type": "number", "exclusiveMinimum": 0},
             "yolo": {"type": "boolean"}, "sandbox": {"type": "boolean"}, "digest": {"type": "boolean"}, "mode": {"type": "string", "enum": ["accept-edits", "plan"]},
             "lease_seconds": {"type": "integer", "minimum": 1},
-        }, ["prompt", "parent_agent_id"]),
+        }),
     },
     {
         "name": "agent_message",
@@ -306,6 +323,13 @@ TOOLS = [
         }, ["action"]),
     },
 ]
+
+_UNREGISTERED_TOOLS = {tool["name"] for tool in TOOLS} - registered_mcp_tools()
+if _UNREGISTERED_TOOLS:
+    raise RuntimeError(
+        "MCP tools missing from the capability registry: "
+        + ", ".join(sorted(_UNREGISTERED_TOOLS))
+    )
 
 
 def _bash() -> str:
@@ -535,6 +559,284 @@ def _persistent_delegate(args: dict) -> dict:
         runtime.close()
 
 
+def _persistent_job_dir() -> Path:
+    configured = os.environ.get("POLYPHONY_MCP_JOBS_DIR")
+    if configured:
+        root = Path(configured).expanduser()
+    elif os.name == "nt":
+        profile = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or Path.home()
+        root = Path(profile) / "Polyphony" / "mcp-jobs"
+    else:
+        runtime = Runtime()
+        try:
+            path = runtime.path
+        finally:
+            runtime.close()
+        root = Path(path).parent / "mcp-jobs" if str(path) != ":memory:" else Path.home() / ".polyphony" / "mcp-jobs"
+    root.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        root.chmod(0o700)
+    return root
+
+
+def _write_private(path: Path, value: str, *, atomic: bool = False) -> None:
+    target = path.with_suffix(path.suffix + ".tmp") if atomic else path
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+            descriptor = -1
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if atomic:
+        os.replace(target, path)
+
+
+def _job_owner(job_id: str, args: dict) -> dict:
+    owner_path = _persistent_job_file(job_id, "owner")
+    try:
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("persistent_delegate job not found") from None
+    parent = str(args.get("parent_agent_id") or "")
+    workspace = canonical_workspace(args.get("workspace") or args.get("directory") or os.getcwd())
+    if not parent or owner.get("parent_agent_id") != parent or owner.get("workspace") != workspace:
+        raise ValueError("persistent_delegate job ownership mismatch")
+    return owner
+
+
+def _job_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def _mark_job_failed(job_id: str, message: str) -> dict:
+    receipt = {"exit_code": 1, "stdout": "", "stderr": message}
+    try:
+        _persistent_job_file(job_id, "request").unlink(missing_ok=True)
+    except OSError:
+        pass
+    _write_private(_persistent_job_file(job_id, "result"), json.dumps(receipt, ensure_ascii=False), atomic=True)
+    return receipt
+
+
+def _enable_windows_kill_on_worker_exit() -> Any:
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimit(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )]
+
+    class ExtendedLimit(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimit), ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    info = ExtendedLimit()
+    info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(error)
+    if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ctypes.WinError(error)
+    return job
+
+
+def _persistent_job_file(job_id: str, suffix: str) -> Path:
+    import re
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise ValueError("invalid persistent_delegate job_id")
+    return _persistent_job_dir() / f"{job_id}.{suffix}"
+
+
+def _persistent_job_worker(job_id: str) -> int:
+    request_path = _persistent_job_file(job_id, "request")
+    result_path = _persistent_job_file(job_id, "result")
+    pid_path = _persistent_job_file(job_id, "pid")
+    _write_private(pid_path, str(os.getpid()))
+    if _persistent_job_file(job_id, "cancelled").exists() or not request_path.exists():
+        return 0
+    process_job = None
+    try:
+        try:
+            process_job = _enable_windows_kill_on_worker_exit()
+        except OSError:
+            # Some hosts already place children in a non-nestable Windows Job.
+            # The explicit cancel path still terminates the worker tree.
+            process_job = None
+        args = json.loads(request_path.read_text(encoding="utf-8"))
+        try:
+            request_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RuntimeError(f"could not remove private request file before running: {exc}") from exc
+        receipt = _persistent_delegate(args)
+    except BaseException as exc:
+        receipt = {"exit_code": 1, "stdout": "", "stderr": f"{type(exc).__name__}: {exc}"}
+    _write_private(result_path, json.dumps(receipt, ensure_ascii=False), atomic=True)
+    if process_job:
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle(process_job)
+    return 0
+
+
+def _persistent_job(args: dict) -> dict:
+    action = str(args.get("action") or "run")
+    if action == "run":
+        return _persistent_delegate(args)
+    job_id = str(args.get("job_id") or "")
+    if action == "start":
+        if not args.get("prompt") or not args.get("parent_agent_id"):
+            raise ValueError("persistent_delegate start requires prompt and parent_agent_id")
+        import uuid
+        job_id = uuid.uuid4().hex
+        owner_workspace = canonical_workspace(args.get("workspace") or args.get("directory") or os.getcwd())
+        _persistent_job_dir()
+        request_path = _persistent_job_file(job_id, "request")
+        _write_private(_persistent_job_file(job_id, "owner"), json.dumps({"parent_agent_id": str(args["parent_agent_id"]), "workspace": owner_workspace}, ensure_ascii=False))
+        _write_private(request_path, json.dumps({key: value for key, value in args.items() if key not in {"action", "job_id"}}, ensure_ascii=False))
+        command = [sys.executable, str(Path(__file__).resolve()), "--persistent-delegate-worker", job_id]
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            process = subprocess.Popen(command, cwd=args.get("workspace") or args.get("directory") or os.getcwd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags, start_new_session=(os.name != "nt"))
+        except BaseException:
+            request_path.unlink(missing_ok=True)
+            _persistent_job_file(job_id, "owner").unlink(missing_ok=True)
+            raise
+        _write_private(_persistent_job_file(job_id, "pid"), str(process.pid))
+        return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "running", "pid": process.pid}}
+    if not job_id:
+        raise ValueError(f"persistent_delegate {action} requires job_id")
+    if action not in {"status", "result", "cancel"}:
+        raise ValueError("persistent_delegate action must be run, start, status, result, or cancel")
+    _job_owner(job_id, args)
+    result_path = _persistent_job_file(job_id, "result")
+    request_path = _persistent_job_file(job_id, "request")
+    cancelled_path = _persistent_job_file(job_id, "cancelled")
+    if action in {"status", "result"}:
+        if result_path.exists():
+            receipt = json.loads(result_path.read_text(encoding="utf-8"))
+            status = "completed" if int(receipt.get("exit_code", 1)) == 0 else "failed"
+            return {"exit_code": int(receipt.get("exit_code", 1)) if action == "result" else 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": status, "result": receipt if action == "result" else None}}
+        if cancelled_path.exists():
+            return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "cancelled"}}
+        pid_path = _persistent_job_file(job_id, "pid")
+        try:
+            pid = int(pid_path.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            pid = 0
+        if pid and _job_pid_alive(pid):
+            return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "running"}}
+        try:
+            age = time.time() - _persistent_job_file(job_id, "owner").stat().st_mtime
+        except OSError:
+            age = 31
+        if not pid and request_path.exists() and age < 30:
+            return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "running"}}
+        failure = _mark_job_failed(job_id, "Persistent delegate worker exited before saving a result.")
+        return {"exit_code": failure["exit_code"] if action == "result" else 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "failed", "result": failure if action == "result" else None}}
+    if action == "cancel":
+        if result_path.exists():
+            receipt = json.loads(result_path.read_text(encoding="utf-8"))
+            status = "completed" if int(receipt.get("exit_code", 1)) == 0 else "failed"
+            return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": status}}
+        pid_path = _persistent_job_file(job_id, "pid")
+        try:
+            pid = int(pid_path.read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            pid = 0
+        if cancelled_path.exists():
+            return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "cancelled"}}
+        if not request_path.exists() and not (pid and _job_pid_alive(pid)):
+            raise ValueError("persistent_delegate job not found")
+        request_path.unlink(missing_ok=True)
+        _write_private(cancelled_path, "cancelled")
+        # A final receipt may have won the race while cancellation was being
+        # recorded. Preserve it as the authoritative terminal outcome.
+        if result_path.exists():
+            return _persistent_job({**args, "action": "status"})
+        if pid:
+            if os.name == "nt":
+                if _job_pid_alive(pid):
+                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            else:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                else:
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+        return {"exit_code": 0, "stdout": "", "stderr": "", "persistent_job": {"job_id": job_id, "status": "cancelled"}}
+    raise ValueError("persistent_delegate action must be run, start, status, result, or cancel")
+
+
 def _dispatch(name: str, args: dict) -> dict:
     instructions = "\n".join(args[k] for k in ("prompt", "question", "query", "goal", "focus")
                              if isinstance(args.get(k), str))
@@ -544,6 +846,17 @@ def _dispatch(name: str, args: dict) -> dict:
             "same draft in chunks: rewrite it to the shortest sufficient contract, normally 200-500 words, using only "
             "objective, paths/scope, non-negotiable constraints, acceptance checks, and a compact receipt."
         )
+    if name == "routing_mode":
+        action = str(args.get("action") or "")
+        directory = args.get("directory") or os.getcwd()
+        if action == "get":
+            return get_routing_mode(directory)
+        if action == "set":
+            if not args.get("mode"):
+                raise ValueError("routing_mode set requires mode")
+            return set_routing_mode(str(args["mode"]), directory)
+        raise ValueError("routing_mode action must be get or set")
+
     if name == "delegate":
         argv = _delegate_args(args, include_prompt=False)
         argv.append("-")
@@ -735,7 +1048,7 @@ def _dispatch(name: str, args: dict) -> dict:
         return _runtime(argv, workspace)
 
     if name == "persistent_delegate":
-        return _persistent_delegate(args)
+        return _persistent_job(args)
 
     if name == "agent_message":
         action = str(args.get("action") or "")
@@ -822,6 +1135,8 @@ def handle_request(req: dict) -> dict | None:
 
 
 def main() -> int:
+    if len(sys.argv) == 3 and sys.argv[1] == "--persistent-delegate-worker":
+        return _persistent_job_worker(sys.argv[2])
     _install_windows_account_launcher()
     for line in sys.stdin:
         if not line.strip():

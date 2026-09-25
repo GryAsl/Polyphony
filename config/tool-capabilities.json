@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "capabilities": ["control-plane", "read-only", "work-producing"],
+  "shell": {
+    "agy": {
+      "actions": {
+        "delegate": "work-producing",
+        "scout": "work-producing",
+        "review": "work-producing",
+        "media": "work-producing",
+        "migrate": "work-producing",
+        "cost-compare": "work-producing"
+      }
+    },
+    "agy-account": {"capability": "control-plane"},
+    "agy-cost-compare": {"capability": "work-producing"},
+    "agy-delegate": {"capability": "work-producing"},
+    "agy-doctor": {"capability": "read-only"},
+    "agy-job": {
+      "actions": {
+        "start": "work-producing",
+        "result": "work-producing",
+        "list": "control-plane",
+        "status": "read-only",
+        "cancel": "control-plane",
+        "cancel-all": "control-plane"
+      }
+    },
+    "agy-media": {"capability": "work-producing"},
+    "agy-migrate": {"capability": "work-producing"},
+    "agy-quota": {"capability": "control-plane"},
+    "agy-review": {"capability": "work-producing"},
+    "agy-routing": {"capability": "control-plane"},
+    "agy-scout": {"capability": "work-producing"},
+    "agy-trace": {"capability": "read-only"},
+    "cloud-debug": {"capability": "work-producing"},
+    "measure-session": {"capability": "read-only"},
+    "polyphony-agent": {"capability": "control-plane"}
+  },
+  "mcp": {
+    "routing_mode": {"capability": "control-plane"},
+    "quota": {"capability": "control-plane"},
+    "account": {"capability": "control-plane"},
+    "trace": {"capability": "read-only"},
+    "doctor": {"capability": "read-only"},
+    "agent_task": {"capability": "control-plane"},
+    "agent_message": {"capability": "control-plane"},
+    "delegate": {"capability": "work-producing"},
+    "scout": {"capability": "work-producing"},
+    "review": {"capability": "work-producing"},
+    "research": {"capability": "work-producing"},
+    "media": {"capability": "work-producing"},
+    "migrate": {"capability": "work-producing"},
+    "cloud_debug": {"capability": "work-producing"},
+    "cost": {"capability": "work-producing"},
+    "cost_compare": {"capability": "work-producing"},
+    "persistent_delegate": {
+      "default": "work-producing",
+      "actions": {
+        "run": "work-producing",
+        "start": "work-producing",
+        "result": "work-producing",
+        "status": "read-only",
+        "cancel": "control-plane"
+      }
+    },
+    "job_result": {"capability": "work-producing"},
+    "job_list": {"capability": "control-plane"},
+    "job_status": {"capability": "read-only"},
+    "job_cancel": {"capability": "control-plane"},
+    "job_cancel_all": {"capability": "control-plane"},
+    "job": {
+      "actions": {
+        "start": "work-producing",
+        "result": "work-producing",
+        "list": "control-plane",
+        "status": "read-only",
+        "cancel": "control-plane",
+        "cancel_all": "control-plane"
+      }
+    }
+  }
+}

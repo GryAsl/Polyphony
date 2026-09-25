@@ -61,7 +61,7 @@ codex plugin marketplace add https://github.com/GryAsl/Polyphony
 codex plugin add antigravity@polyphony
 ```
 
-Start a new Codex task after installation. The plugin provides direct MCP tools for delegation, scouting, review, research, media, jobs, quota control, traces, diagnostics, migration, Cloud debugging, and cost comparison. Note that Codex plugin hooks must be reviewed and trusted whenever their definitions change.
+Start a new Codex task after installation. The plugin provides direct MCP tools for routing-mode control, delegation, scouting, review, research, media, jobs, quota control, traces, diagnostics, migration, Cloud debugging, and cost comparison. Note that Codex plugin hooks must be reviewed and trusted whenever their definitions change.
 
 ## Routing modes
 
@@ -84,8 +84,11 @@ new conversations, reboots, reconnects and resume; missing or damaged preference
 updates, version checks, skill/MCP discovery, session management, bounded conductor checks and user
 interaction remain native. Editing the code that implements those features is still repository work.
 
-**Manual switching:** Use "switch Agy mode to strict", "set Agy mode to soft", or "soft moda geç".
-The host must receive a successful persistence receipt before claiming a preference was saved.
+**Manual switching:** Express the desired mode naturally or run `/antigravity:mode strict|soft`.
+Claude Code and Codex map that intent to the local `routing_mode` control-plane tool; they must
+never delegate the change to an Agy worker. If MCP is unavailable, `agy-routing set strict|soft
+--directory <workspace>` is the equivalent local fallback. Its verified workspace receipt takes effect in the
+current session and future sessions without a restart.
 
 ### Shared workflow
 
@@ -131,6 +134,7 @@ agy-review --tier flash --dir "C:\path\to\repo" --staged --goal "Implement featu
 agy-job start --tier flash --dir "C:\path\to\repo" "Complete this long-running task"
 agy-quota --force
 agy-account list
+agy-routing --help
 ```
 
 Routine calls default to 30 minutes; use `--timeout 45m` or `--timeout 60m` for broad,
@@ -150,6 +154,12 @@ subagent it created in the same workspace; agents never enter a global pool. Eac
 active task at a time, with leases, heartbeat/stale recovery, bounded delegation, short messages,
 handoff, and a fresh-conversation fallback when resume fails. Claude and Codex use the same Python
 runtime; ordinary `delegate` remains available when isolation is preferred.
+
+For work that may outlast an MCP request, call `persistent_delegate` with `action: "start"` and
+collect it later with `status` and `result` using the returned `job_id`, the same
+`parent_agent_id`, and the same workspace. `cancel` stops its process tree. The original
+`run` action remains synchronous for short tasks. On the first call, omit `agent_id` (or use
+`fresh_agent: true`); reuse only an `agent_id` returned by Polyphony for that parent and workspace.
 
 ## Local Agy account pool
 

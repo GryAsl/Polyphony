@@ -31,24 +31,21 @@ try:
     from polyphony_update import check_for_update
 except Exception:  # Update checks are best-effort and must never break routing.
     check_for_update = None
+from polyphony_routing import (  # noqa: E402
+    get_mode as get_routing_mode,
+    resolve_workspace_root as resolve_routing_workspace,
+    set_mode as set_routing_mode,
+    workspace_state_path as routing_workspace_state_path,
+)
+from polyphony_capabilities import (  # noqa: E402
+    mcp_capability,
+    normalize_executable,
+    registered_shell_commands,
+    shell_capability,
+)
 
 
-APPROVED_AGY_WRAPPERS = {
-    "agy",
-    "agy-scout",
-    "agy-delegate",
-    "agy-review",
-    "agy-job",
-    "agy-doctor",
-    "agy-trace",
-    "agy-quota",
-    "agy-account",
-    "agy-media",
-    "agy-migrate",
-    "agy-cost-compare",
-    "cloud-debug",
-    "polyphony-agent",
-}
+REGISTERED_POLYPHONY_COMMANDS = registered_shell_commands()
 
 SHELL_TOOL_NAMES = {
     "bash",
@@ -149,6 +146,14 @@ AGY_PROMPT_DISCIPLINE = (
     "background, or a step-by-step implementation plan: the worker must inspect referenced files. "
     "Never split or incrementally write one oversized prompt to evade the gate; use separate workers "
     "only for genuinely independent outcomes."
+)
+ROUTING_CONTROL_DISCIPLINE = (
+    "[Polyphony routing control] If the user's current request is to change Agy routing between "
+    "strict and soft, do not delegate it. Immediately call the local `routing_mode` tool with "
+    "`action=set`, the requested mode, and the current workspace directory; if MCP is unavailable, "
+    "run `agy-routing set strict|soft --directory <workspace>` locally. Treat the verified "
+    "receipt as effective for this running session and future sessions; do not inspect, probe, or "
+    "request a restart, and acknowledge it briefly."
 )
 
 # Strict is a routing guarantee for substantive work, not a blanket host lock.
@@ -310,59 +315,24 @@ def _resolve_workspace_root(data: dict | None = None) -> Path:
             or data.get("project_path")
             or data.get("projectPath")
         )
-    p = Path(raw).expanduser() if raw else Path.cwd()
-    try:
-        resolved = p.resolve()
-    except Exception:
-        resolved = p.absolute()
-    if resolved.is_file():
-        resolved = resolved.parent
-    cur = resolved
-    while True:
-        if (cur / ".git").exists():
-            return cur
-        parent = cur.parent
-        if parent == cur:
-            break
-        cur = parent
-    return resolved
+    return resolve_routing_workspace(raw)
 
 
 def _workspace_state_path(data: dict | None = None) -> Path:
-    ws = _resolve_workspace_root(data)
-    norm = os.path.normcase(str(ws))
-    safe_id = hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest()[:24]
-    return _state_dir() / f"ws-{safe_id}.json"
+    return routing_workspace_state_path(_resolve_workspace_root(data))
 
 
 def _read_persisted_workspace_mode(data: dict | None = None) -> str | None:
-    path = _workspace_state_path(data)
     try:
-        if path.exists():
-            content = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(content, dict):
-                mode = content.get("mode")
-                if mode in {"strict", "soft"}:
-                    return mode
+        receipt = get_routing_mode(_resolve_workspace_root(data))
+        return receipt["mode"] if receipt.get("explicit") else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _write_persisted_workspace_mode(mode: str, data: dict | None = None) -> bool:
-    if mode not in {"strict", "soft"}:
-        return False
-    path = _workspace_state_path(data)
     try:
-        temporary = path.with_suffix(f".{os.getpid()}.tmp")
-        payload = {
-            "mode": mode,
-            "workspace": str(_resolve_workspace_root(data)),
-            "updated_at": time.time(),
-        }
-        temporary.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(temporary, path)
-        return _read_persisted_workspace_mode(data) == mode
+        return set_routing_mode(mode, _resolve_workspace_root(data)).get("mode") == mode
     except Exception:
         return False
 
@@ -370,6 +340,7 @@ def _write_persisted_workspace_mode(mode: str, data: dict | None = None) -> bool
 def _default_state() -> dict:
     return {
         "mode": "soft",
+        "workspace": "",
         "question_presented": False,
         "turn_id": "",
         "is_substantive": False,
@@ -404,9 +375,20 @@ def _read_state(session_id: str, data: dict | None = None) -> dict:
     except Exception:
         pass
 
-    if isinstance(loaded, dict) and loaded.get("mode") in {"strict", "soft"}:
-        return state
-    persisted_mode = _read_persisted_workspace_mode(data)
+    workspace_data = data
+    if not any((data or {}).get(key) for key in (
+        "cwd", "working_directory", "workingDirectory", "workspace", "project_path", "projectPath"
+    )) and state.get("workspace"):
+        workspace_data = {"cwd": state["workspace"]}
+    try:
+        state["workspace"] = str(_resolve_workspace_root(workspace_data))
+    except Exception:
+        pass
+
+    # The workspace control plane is authoritative. Synchronize it on every
+    # hook event so a mode change made through MCP/CLI takes effect immediately
+    # in an already-running strict session instead of waiting for a restart.
+    persisted_mode = _read_persisted_workspace_mode(workspace_data)
     if persisted_mode in {"strict", "soft"}:
         state["mode"] = persisted_mode
         state["question_presented"] = False
@@ -903,7 +885,7 @@ def _has_unquoted_shell_control(cmd: str) -> bool:
 
 
 def parse_single_agy_shell_command(cmd: str) -> tuple[str, list[str]] | None:
-    """If cmd is a pure, single command whose sole executable is an approved Polyphony wrapper,
+    """If cmd is a pure, single command whose sole executable is a registered Polyphony command,
     return (wrapper_stem, tokens).
     If it is compound, chained, uses pipelines/operators, or the executable is not an approved wrapper,
     return None.
@@ -937,13 +919,9 @@ def parse_single_agy_shell_command(cmd: str) -> tuple[str, list[str]] | None:
             return None
         prev = t
 
-    exe = tokens[0]
-    stem = Path(exe).stem.lower()
-    for ext in (".exe", ".bat", ".cmd", ".sh"):
-        if stem.endswith(ext):
-            stem = stem[:-len(ext)]
+    stem = normalize_executable(tokens[0])
 
-    if stem in APPROVED_AGY_WRAPPERS:
+    if stem in REGISTERED_POLYPHONY_COMMANDS:
         return stem, tokens
 
     return None
@@ -958,11 +936,7 @@ def _agy_compound_command(cmd: str) -> tuple[str, list[str]] | None:
     mode.  Permit only those non-mutating heads; arbitrary shell chains (rm,
     git reset, network commands, etc.) still require the normal strict route.
     """
-    if not cmd or not re.search(
-        r"(?:^|[\s/])agy(?:[-_](?:delegate|scout|review|job|media|quota|trace|doctor|migrate))?\b",
-        cmd,
-        re.IGNORECASE,
-    ):
+    if not cmd:
         return None
     if "\n" in cmd or "\r" in cmd:
         return None
@@ -994,14 +968,10 @@ def _agy_compound_command(cmd: str) -> tuple[str, list[str]] | None:
     allowed_heads = {"cd", "cat", "get-content", "type"}
     agy_wrapper = ""
     agy_tokens: list[str] = []
-    compound_work_wrappers = {
-        "agy", "agy-delegate", "agy-scout", "agy-review", "agy-job",
-        "agy-media", "agy-migrate", "agy-cost-compare", "cloud-debug",
-    }
     for segment in segments:
-        head = Path(segment[0]).stem.lower()
-        if head in APPROVED_AGY_WRAPPERS:
-            if head not in compound_work_wrappers:
+        head = normalize_executable(segment[0])
+        if head in REGISTERED_POLYPHONY_COMMANDS:
+            if shell_capability(segment) != "work-producing":
                 return None
             # Shell operators/process substitution must not hide behind an Agy
             # token.  A quoted variable such as "$TASK" is fine; standalone
@@ -1027,7 +997,7 @@ def _agy_compound_command(cmd: str) -> tuple[str, list[str]] | None:
         ):
             continue
         # PowerShell assignment: $task = Get-Content -Raw file
-        if len(segment) >= 3 and re.match(r"^\$?[A-Za-z_][A-Za-z0-9_]*$", segment[0]) and segment[1] == "=" and Path(segment[2]).stem.lower() in {"get-content", "type"}:
+        if len(segment) >= 3 and re.match(r"^\$?[A-Za-z_][A-Za-z0-9_]*$", segment[0]) and segment[1] == "=" and normalize_executable(segment[2]) in {"get-content", "type"}:
             continue
         return None
     return (agy_wrapper, agy_tokens) if agy_wrapper else None
@@ -1108,61 +1078,29 @@ def _classify(tool_name: str, tool_input: dict) -> str | None:
 
 
 def is_work_producing_agy_call(tool_name: str, tool_input: dict) -> bool:
+    return _polyphony_capability(tool_name, tool_input) == "work-producing"
+
+
+def _polyphony_capability(tool_name: str, tool_input: dict) -> str | None:
+    """Resolve one Polyphony call through the shared declarative registry."""
     lowered_name = tool_name.lower()
-
-    if lowered_name.startswith("mcp__antigravity__"):
-        if lowered_name in {
-            "mcp__antigravity__delegate",
-            "mcp__antigravity__scout",
-            "mcp__antigravity__review",
-            "mcp__antigravity__media",
-            "mcp__antigravity__migrate",
-            "mcp__antigravity__cloud_debug",
-            "mcp__antigravity__cost_compare",
-            "mcp__antigravity__job_result",
-            "mcp__antigravity__persistent_delegate",
-        }:
-            return True
-        if lowered_name == "mcp__antigravity__job":
-            return tool_input.get("action") in {"start", "result"}
-        return False
-
+    if lowered_name.startswith(("mcp__antigravity__", "mcp__polyphony__")):
+        return mcp_capability(lowered_name, tool_input)
     if lowered_name in SHELL_TOOL_NAMES:
-        cmd = _get_shell_command(tool_input)
-        if not cmd:
-            return False
-        parsed = parse_single_agy_shell_command(cmd)
+        command = _get_shell_command(tool_input)
+        if not command:
+            return None
+        parsed = parse_single_agy_shell_command(command)
         if parsed is None:
-            parsed = _agy_compound_command(cmd)
+            parsed = _agy_compound_command(command)
         if parsed is None:
-            return False
-        wrapper, tokens = parsed
-        if wrapper in {
-            "agy-delegate", "agy-scout", "agy-review", "agy-media",
-            "agy-migrate", "agy-cost-compare", "cloud-debug",
-        }:
-            return True
-        if wrapper == "agy-job":
-            return len(tokens) > 1 and tokens[1].lower() in {"start", "result"}
-        if wrapper == "agy":
-            return len(tokens) > 1 and tokens[1].lower() in {
-                "delegate", "scout", "review", "media", "migrate", "cost-compare",
-            }
-        if Path(tokens[0]).stem.lower() == "research" and "commands" in tokens[0].lower():
-            return True
-
-    return False
+            return None
+        return shell_capability(parsed[1])
+    return None
 
 
 def is_any_agy_call(tool_name: str, tool_input: dict) -> bool:
-    lowered_name = tool_name.lower()
-    if lowered_name.startswith("mcp__antigravity__"):
-        return True
-    if lowered_name in SHELL_TOOL_NAMES:
-        cmd = _get_shell_command(tool_input)
-        if cmd and (parse_single_agy_shell_command(cmd) is not None or _agy_compound_command(cmd) is not None):
-            return True
-    return False
+    return _polyphony_capability(tool_name, tool_input) is not None
 
 
 def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
@@ -1193,49 +1131,10 @@ def is_control_plane_exempt(tool_name: str, tool_input: dict) -> bool:
                 and _is_agy_prompt_plumbing(path):
             return True
 
-    # Quota MCP tools
-    if lowered_name in {"mcp__antigravity__quota", "mcp__antigravity__account"} or (
-        lowered_name.startswith("mcp__antigravity__") and lowered_name.endswith(("__quota", "__account"))
-    ):
+    # Polyphony's registry is the sole source of truth for safe local control
+    # and read-only calls. Work-producing calls remain subject to strict mode.
+    if _polyphony_capability(tool_name, tool_input) in {"control-plane", "read-only"}:
         return True
-
-    # Persistent-agent registry and message-bus operations are control-plane
-    # bookkeeping. They must remain available in strict mode; only the actual
-    # persistent_delegate call is work-producing and is gated above.
-    if lowered_name in {"mcp__antigravity__agent_task", "mcp__antigravity__agent_message"}:
-        return True
-
-    # Quota shell commands
-    if lowered_name in SHELL_TOOL_NAMES:
-        cmd = _get_shell_command(tool_input)
-        if cmd:
-            parsed = parse_single_agy_shell_command(cmd)
-            if parsed is not None and parsed[0] in {"agy-quota", "agy-account"}:
-                return True
-
-    # Doctor / trace / job management MCP tools
-    if lowered_name in {
-        "mcp__antigravity__doctor", "mcp__antigravity__trace",
-        "mcp__antigravity__job_list", "mcp__antigravity__job_status",
-        "mcp__antigravity__job_cancel", "mcp__antigravity__job_cancel_all",
-    }:
-        return True
-    if lowered_name == "mcp__antigravity__job" and tool_input.get("action") in {"list", "status", "cancel", "cancel_all"}:
-        return True
-
-    # Doctor / trace / job management shell commands
-    if lowered_name in SHELL_TOOL_NAMES:
-        cmd = _get_shell_command(tool_input)
-        if cmd:
-            parsed = parse_single_agy_shell_command(cmd)
-            if parsed is not None:
-                wrapper, tokens = parsed
-                if wrapper in {"agy-doctor", "agy-trace"}:
-                    return True
-                if wrapper == "polyphony-agent":
-                    return True
-                if wrapper == "agy-job" and len(tokens) > 1 and tokens[1].lower() in {"list", "status", "cancel", "cancel-all"}:
-                    return True
 
     return False
 
@@ -1337,7 +1236,7 @@ def _nested_response_dicts(value: any):
     if not isinstance(value, dict):
         return
     yield value
-    for key in ("result", "job", "task", "background_task", "backgroundTask", "structuredContent", "structured_content"):
+    for key in ("result", "job", "persistent_job", "task", "background_task", "backgroundTask", "structuredContent", "structured_content"):
         nested = value.get(key)
         if isinstance(nested, dict):
             yield from _nested_response_dicts(nested)
@@ -1418,6 +1317,14 @@ def _mcp_job_start_succeeded(data: dict, tool_input: dict, response: any) -> boo
     return bool(_background_task_id(data, response) or _agy_job_started_id(response))
 
 
+def _persistent_job_record(response: any) -> dict | None:
+    for obj in _nested_response_dicts(_response_dict(response) or response) or ():
+        record = obj.get("persistent_job")
+        if isinstance(record, dict):
+            return record
+    return None
+
+
 def _background_result_is_pending(data: dict, tool_input: dict, response: any) -> bool:
     """Return true only for explicit host signals that work is still running.
 
@@ -1426,6 +1333,9 @@ def _background_result_is_pending(data: dict, tool_input: dict, response: any) -
     result is asynchronous would weaken strict routing and hide failures.
     """
     response_obj = _response_dict(response)
+    persistent_job = _persistent_job_record(response)
+    if persistent_job and _normalize_async_status(persistent_job.get("status")) in PENDING_RESPONSE_STATUSES:
+        return True
     if _agy_job_start_command(tool_input):
         return True
     if _mcp_job_start_succeeded(data, tool_input, response):
@@ -1872,8 +1782,10 @@ def handle_session_start(data: dict, session_id: str) -> None:
     state = _read_state(session_id, data=data)
     if "clear" in {matcher, source, trigger}:
         current_mode = state.get("mode")
+        current_workspace = state.get("workspace", "")
         state = _default_state()
         state["mode"] = current_mode
+        state["workspace"] = current_workspace
         if current_mode in {"strict", "soft"}:
             state["question_presented"] = False
 
@@ -1937,6 +1849,7 @@ def handle_session_end(session_id: str, data: dict | None = None) -> None:
     if mode in {"strict", "soft"}:
         preserved = _default_state()
         preserved["mode"] = mode
+        preserved["workspace"] = state.get("workspace", "")
         _write_state(session_id, preserved)
 
 
@@ -1993,7 +1906,7 @@ def handle_user_prompt_submit(data: dict, state: dict, session_id: str, turn_id:
         # Strict mode is the path where every substantive turn may create an Agy
         # request. Reinject immediately before the conductor drafts that request;
         # SessionStart/compact injection remains the all-mode baseline.
-        contexts.insert(0, AGY_PROMPT_DISCIPLINE)
+        contexts.insert(0, f"{ROUTING_CONTROL_DISCIPLINE}\n\n{AGY_PROMPT_DISCIPLINE}")
     if (state.get("mode") == "soft" and not context_to_emit
             and os.environ.get("CLAUDE_PLUGIN_OPTION_DELEGATION_NUDGE", "on").lower().strip() not in {"off", "false", "0", "no", "disabled"}
             and not any(token in str(prompt).lower() for token in ("antigravity", "agy-delegate", "agy-job"))
@@ -2158,6 +2071,19 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
 
     response = data.get("tool_response") if data.get("tool_response") is not None else data.get("toolResponse", data.get("result", data.get("response")))
 
+    persistent_action = str(tool_input.get("action") or "run").lower() if tool_name.lower() in {
+        "mcp__antigravity__persistent_delegate", "mcp__polyphony__persistent_delegate"
+    } else ""
+    persistent_record = _persistent_job_record(response) if persistent_action else None
+    if persistent_action == "cancel" and state.get("agy_pending"):
+        if event == "PostToolUse" and persistent_record and persistent_record.get("status") == "cancelled":
+            state["agy_pending"] = False
+            state["agy_failed"] = True
+            state["agy_success"] = False
+            state["last_agy_error"] = "persistent delegation cancelled"
+            _write_state(session_id, state)
+        return
+
     # Claude's TaskOutput (and equivalent host tools) are not themselves Agy
     # calls, but they complete a previously recorded background delegation.
     # Consume their terminal result so a successful worker can release the
@@ -2208,7 +2134,13 @@ def handle_post_tool_use(event: str, data: dict, state: dict, session_id: str) -
             state["agy_failed"] = False
             state["last_agy_error"] = ""
         else:
-            success, err = is_agy_response_successful(response)
+            terminal_response = (
+                persistent_record.get("result") if persistent_action == "result"
+                and persistent_record and persistent_record.get("status") == "completed"
+                else persistent_record if persistent_action == "result" and persistent_record
+                else response
+            )
+            success, err = is_agy_response_successful(terminal_response)
             state["agy_pending"] = False
             state["agy_task_id"] = _background_task_id(data, tool_input, response) or state.get("agy_task_id", "")
             if success:

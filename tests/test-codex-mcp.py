@@ -28,8 +28,13 @@ class McpAdapterTests(unittest.TestCase):
     def setUp(self):
         self.calls = []
         self.account_state = tempfile.TemporaryDirectory()
+        self.job_state = tempfile.TemporaryDirectory()
         self.old_accounts_dir = os.environ.get("POLYPHONY_ACCOUNTS_DIR")
+        self.old_routing_dir = os.environ.get("AGY_ROUTING_STATE_DIR")
+        self.old_jobs_dir = os.environ.get("POLYPHONY_MCP_JOBS_DIR")
         os.environ["POLYPHONY_ACCOUNTS_DIR"] = self.account_state.name
+        os.environ["AGY_ROUTING_STATE_DIR"] = self.account_state.name
+        os.environ["POLYPHONY_MCP_JOBS_DIR"] = self.job_state.name
         self.old_run = mcp.subprocess.run
         self.old_bash = mcp._bash
         mcp._bash = lambda: "bash"
@@ -47,7 +52,16 @@ class McpAdapterTests(unittest.TestCase):
             os.environ.pop("POLYPHONY_ACCOUNTS_DIR", None)
         else:
             os.environ["POLYPHONY_ACCOUNTS_DIR"] = self.old_accounts_dir
+        if self.old_routing_dir is None:
+            os.environ.pop("AGY_ROUTING_STATE_DIR", None)
+        else:
+            os.environ["AGY_ROUTING_STATE_DIR"] = self.old_routing_dir
+        if self.old_jobs_dir is None:
+            os.environ.pop("POLYPHONY_MCP_JOBS_DIR", None)
+        else:
+            os.environ["POLYPHONY_MCP_JOBS_DIR"] = self.old_jobs_dir
         self.account_state.cleanup()
+        self.job_state.cleanup()
 
     def wrapper(self):
         return Path(self.calls[-1][0][1]).name
@@ -83,6 +97,24 @@ class McpAdapterTests(unittest.TestCase):
         self.assertIn("account", tools)
         self.assertIn("handoff", tools["agent_task"]["inputSchema"]["properties"]["action"]["enum"])
 
+    def test_routing_mode_is_local_authoritative_control_plane(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            Path(workspace, ".git").mkdir()
+            changed = mcp._dispatch("routing_mode", {
+                "action": "set", "mode": "soft", "directory": workspace,
+            })
+            current = mcp._dispatch("routing_mode", {
+                "action": "get", "directory": workspace,
+            })
+        self.assertEqual(changed["exit_code"], 0)
+        self.assertEqual(changed["mode"], "soft")
+        self.assertTrue(changed["explicit"])
+        self.assertEqual(current["mode"], "soft")
+        self.assertEqual(self.calls, [])
+        tool = next(tool for tool in mcp.TOOLS if tool["name"] == "routing_mode")
+        self.assertIn("Never delegate", tool["description"])
+        self.assertEqual(tool["inputSchema"]["required"], ["action", "directory"])
+
     def test_persistent_delegate_claims_and_reuses_parent_owned_agent(self):
         old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,6 +142,180 @@ class McpAdapterTests(unittest.TestCase):
         self.assertEqual(0, first["exit_code"])
         self.assertEqual(first["persistent"]["agent_id"], second["persistent"]["agent_id"])
         self.assertEqual("conv-1", second["persistent"]["conversation_id"])
+
+    def test_persistent_delegate_async_job_can_be_collected(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        old_popen = mcp.subprocess.Popen
+        old_alive = mcp._job_pid_alive
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            mcp.subprocess.Popen = lambda *args, **kwargs: types.SimpleNamespace(pid=12345)
+            mcp._job_pid_alive = lambda pid: True
+            try:
+                started = mcp._dispatch("persistent_delegate", {
+                    "action": "start", "prompt": "long task", "parent_agent_id": "main", "workspace": tmp,
+                })
+                job_id = started["persistent_job"]["job_id"]
+                owned = {"action": "status", "job_id": job_id, "parent_agent_id": "main", "workspace": tmp}
+                self.assertEqual("running", mcp._dispatch("persistent_delegate", owned)["persistent_job"]["status"])
+                mcp._persistent_job_file(job_id, "result").write_text(json.dumps({"exit_code": 0, "stdout": "done", "stderr": ""}), encoding="utf-8")
+                collected = mcp._dispatch("persistent_delegate", {**owned, "action": "result"})
+            finally:
+                mcp.subprocess.Popen = old_popen
+                mcp._job_pid_alive = old_alive
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+        self.assertEqual("completed", collected["persistent_job"]["status"])
+        self.assertEqual(0, collected["exit_code"])
+        self.assertEqual("done", collected["persistent_job"]["result"]["stdout"])
+
+    def test_persistent_delegate_async_cancel_removes_pending_request(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        old_popen = mcp.subprocess.Popen
+        old_alive = mcp._job_pid_alive
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            mcp.subprocess.Popen = lambda *args, **kwargs: types.SimpleNamespace(pid=12345)
+            mcp._job_pid_alive = lambda pid: False
+            try:
+                started = mcp._dispatch("persistent_delegate", {
+                    "action": "start", "prompt": "long task", "parent_agent_id": "main", "workspace": tmp,
+                })
+                job_id = started["persistent_job"]["job_id"]
+                _write = mcp._persistent_job_file(job_id, "pid")
+                _write.write_text("12345", encoding="ascii")
+                owned = {"parent_agent_id": "main", "workspace": tmp, "job_id": job_id}
+                cancelled = mcp._dispatch("persistent_delegate", {**owned, "action": "cancel"})
+                self.assertFalse(mcp._persistent_job_file(job_id, "request").exists())
+                status = mcp._dispatch("persistent_delegate", {**owned, "action": "status"})
+            finally:
+                mcp.subprocess.Popen = old_popen
+                mcp._job_pid_alive = old_alive
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+        self.assertEqual("cancelled", cancelled["persistent_job"]["status"])
+        self.assertEqual("cancelled", status["persistent_job"]["status"])
+
+    def test_persistent_delegate_completion_wins_cancel_race(self):
+        old_popen = mcp.subprocess.Popen
+        old_alive = mcp._job_pid_alive
+        old_write = mcp._write_private
+        with tempfile.TemporaryDirectory() as workspace:
+            mcp.subprocess.Popen = lambda *args, **kwargs: types.SimpleNamespace(pid=12345)
+            mcp._job_pid_alive = lambda pid: False
+            try:
+                started = mcp._dispatch("persistent_delegate", {
+                    "action": "start", "prompt": "task", "parent_agent_id": "main", "workspace": workspace,
+                })
+                job_id = started["persistent_job"]["job_id"]
+                result_path = mcp._persistent_job_file(job_id, "result")
+
+                def complete_during_cancel(path, value, *, atomic=False):
+                    old_write(path, value, atomic=atomic)
+                    if path.suffix == ".cancelled":
+                        old_write(result_path, json.dumps({"exit_code": 0, "stdout": "done", "stderr": ""}))
+
+                mcp._write_private = complete_during_cancel
+                owned = {"job_id": job_id, "parent_agent_id": "main", "workspace": workspace}
+                cancelled = mcp._dispatch("persistent_delegate", {**owned, "action": "cancel"})
+                collected = mcp._dispatch("persistent_delegate", {**owned, "action": "result"})
+            finally:
+                mcp._write_private = old_write
+                mcp._job_pid_alive = old_alive
+                mcp.subprocess.Popen = old_popen
+        self.assertEqual("completed", cancelled["persistent_job"]["status"])
+        self.assertEqual("completed", collected["persistent_job"]["status"])
+        self.assertEqual("done", collected["persistent_job"]["result"]["stdout"])
+
+    def test_persistent_delegate_async_enforces_job_owner(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        old_popen = mcp.subprocess.Popen
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            mcp.subprocess.Popen = lambda *args, **kwargs: types.SimpleNamespace(pid=12345)
+            try:
+                started = mcp._dispatch("persistent_delegate", {
+                    "action": "start", "prompt": "long task", "parent_agent_id": "main", "workspace": tmp,
+                })
+                job_id = started["persistent_job"]["job_id"]
+                with self.assertRaisesRegex(ValueError, "ownership mismatch"):
+                    mcp._dispatch("persistent_delegate", {
+                        "action": "status", "job_id": job_id, "parent_agent_id": "other", "workspace": tmp,
+                    })
+            finally:
+                mcp.subprocess.Popen = old_popen
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+
+    def test_persistent_delegate_async_marks_dead_worker_failed_and_preserves_exit_code(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        old_popen = mcp.subprocess.Popen
+        old_alive = mcp._job_pid_alive
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            mcp.subprocess.Popen = lambda *args, **kwargs: types.SimpleNamespace(pid=12345)
+            mcp._job_pid_alive = lambda pid: False
+            try:
+                started = mcp._dispatch("persistent_delegate", {
+                    "action": "start", "prompt": "long task", "parent_agent_id": "main", "workspace": tmp,
+                })
+                job_id = started["persistent_job"]["job_id"]
+                result = mcp.handle_request({
+                    "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": "persistent_delegate", "arguments": {
+                        "action": "result", "job_id": job_id, "parent_agent_id": "main", "workspace": tmp,
+                    }},
+                })
+                result = result["result"]
+                self.assertTrue(result["isError"])
+                result = result["structuredContent"]
+                self.assertEqual("failed", result["persistent_job"]["status"])
+                self.assertEqual(1, result["exit_code"])
+                self.assertIn("exited before saving", result["persistent_job"]["result"]["stderr"])
+            finally:
+                mcp.subprocess.Popen = old_popen
+                mcp._job_pid_alive = old_alive
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
+
+    def test_persistent_delegate_async_files_are_private_and_request_is_consumed(self):
+        old_db = os.environ.get("POLYPHONY_RUNTIME_DB")
+        old_delegate = mcp._persistent_delegate
+        old_popen = mcp.subprocess.Popen
+        old_job_guard = mcp._enable_windows_kill_on_worker_exit
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["POLYPHONY_RUNTIME_DB"] = str(Path(tmp) / "runtime.db")
+            mcp.subprocess.Popen = lambda *args, **kwargs: types.SimpleNamespace(pid=12345)
+            try:
+                started = mcp._dispatch("persistent_delegate", {
+                    "action": "start", "prompt": "secret prompt", "parent_agent_id": "main", "workspace": tmp,
+                })
+                job_id = started["persistent_job"]["job_id"]
+                request = mcp._persistent_job_file(job_id, "request")
+                mode = mcp._persistent_job_dir().stat().st_mode & 0o777
+                if os.name != "nt":
+                    self.assertEqual(0o700, mode)
+                    self.assertEqual(0o600, request.stat().st_mode & 0o777)
+                mcp._persistent_delegate = lambda args: {"exit_code": 0, "stdout": "done", "stderr": ""}
+                mcp._enable_windows_kill_on_worker_exit = lambda: None
+                mcp._persistent_job_worker(job_id)
+                self.assertFalse(request.exists())
+            finally:
+                mcp._persistent_delegate = old_delegate
+                mcp._enable_windows_kill_on_worker_exit = old_job_guard
+                mcp.subprocess.Popen = old_popen
+                if old_db is None:
+                    os.environ.pop("POLYPHONY_RUNTIME_DB", None)
+                else:
+                    os.environ["POLYPHONY_RUNTIME_DB"] = old_db
 
     def test_persistent_delegate_keeps_conversations_separate_per_account(self):
         old_db = os.environ.get("POLYPHONY_RUNTIME_DB")

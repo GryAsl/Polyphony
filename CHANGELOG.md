@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.31.68 — Transient stream recovery and Windows trace fixes
+## 0.31.68 — Reliable routing and transient worker recovery
 
 - Treat every structured Agy status other than `SUCCESS` as a failure. A backend `INTERNAL`
   with rc 0 and an empty response was misreported as empty output (exit 3) and never classified.
@@ -14,6 +14,21 @@
 - Prompt-budget hook: count a wrapper only when it is the executed command of a pipeline
   segment. Commands that merely mention a wrapper path (patch scripts, greps, heredoc bodies)
   were denied as oversized Agy prompts.
+- Bound transient retries to the original timeout, allow an explicitly empty retry list to
+  disable them, and suppress replay after cancellation, signals, or ambiguous transcripts.
+- Add asynchronous `persistent_delegate` start/status/result/cancel jobs so long work can outlive
+  an MCP request. Job collection preserves worker failures; cancellation stops the process tree.
+
+- Replace natural-language mode-switch correctness with a first-class local `routing_mode` MCP
+  operation shared by Claude Code and Codex. Agents interpret the user's language, then perform one
+  deterministic `get` or `set`; mode changes are never delegated to Agy workers.
+- Make the workspace routing store authoritative on every hook event, eliminating the split-brain
+  state where a persisted soft preference could coexist with a still-strict active session.
+- Add `/antigravity:mode`, atomic verified persistence, and compact receipts. A successful set takes
+  effect for the active session and future sessions without probing files or restarting the host.
+- Replace duplicated strict-mode command allowlists with one declarative capability registry shared
+  by shell and MCP classification. Control-plane and read-only calls stay available, work calls stay
+  gated, and help/version introspection is recognized generically for every registered command.
 
 ## 0.31.67 — Compact Agy prompt enforcement
 
